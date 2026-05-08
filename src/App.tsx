@@ -14,6 +14,24 @@ import './App.css'
 
 const initialForm = getInitialFormBootstrap()
 
+/** Подсказки к заголовкам таблицы сравнения периодов (нативный title / курсор help). */
+const COMPARE_TABLE_COL_HINTS = {
+  index: 'Порядковый номер периода в сравнении.',
+  range:
+    'Календарные границы: дата начала и дата конца (если конец не задан, используется сегодняшняя дата).',
+  days: 'Число календарных дней в ряду графика активности (часовой пояс браузера).',
+  approved: 'Количество событий одобрения merge request (approved) за период.',
+  commented:
+    'Комментарии пользователя в merge request других авторов; комментарии в собственных MR не учитываются.',
+  mrsCreated: 'Число merge request с автором-пользователем, созданных за период.',
+  diffLines:
+    'Сумма добавленных и удалённых строк по диффу для уникальных MR из событий одобрения за период.',
+  commPerAppr:
+    'Отношение числа комментариев в чужих MR к числу одобрений за тот же период (комментариев на одно одобрение).',
+  linesPerComm:
+    'Отношение суммы строк диффа в одобрённых MR к числу комментариев в чужих MR за период (строк на один комментарий).',
+} as const
+
 type Stats = {
   approved: string
   commented: string
@@ -102,6 +120,14 @@ function formatCommentsPerApproval(approvedRaw: string, commentedRaw: string): s
   return ratio.toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 2 })
 }
 
+function ruPeriodCountLabel(n: number): string {
+  const mod10 = n % 10
+  const mod100 = n % 100
+  if (mod10 === 1 && mod100 !== 11) return `${n} период`
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${n} периода`
+  return `${n} периодов`
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const r = await fetch(path, {
     method: 'POST',
@@ -137,6 +163,7 @@ export default function App() {
   const [detailDay, setDetailDay] = useState<string | null>(null)
   const [detailPeriodId, setDetailPeriodId] = useState<string | null>(null)
   const [detailItems, setDetailItems] = useState<DayDetailItem[]>([])
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const primaryStartDate = periodRows[0]?.startDate?.trim() ?? ''
 
@@ -164,6 +191,20 @@ export default function App() {
     }, 400)
     return () => window.clearTimeout(id)
   }, [gitlabUrl, token, username, userEntryMode, periodRows])
+
+  useEffect(() => {
+    if (!settingsOpen) return
+    function onKeyDown(ev: globalThis.KeyboardEvent) {
+      if (ev.key === 'Escape') setSettingsOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = prevOverflow
+    }
+  }, [settingsOpen])
 
   const mergedSelectUsers = useMemo(() => {
     const m = new Map<string, { username: string; name: string }>()
@@ -214,6 +255,7 @@ export default function App() {
     setUserPickerOpen(false)
     setUserSearchQuery('')
     setUserListHighlight(0)
+    setSettingsOpen(false)
   }
 
   function pickOtherUser() {
@@ -249,6 +291,7 @@ export default function App() {
   function handleUserPickerSearchKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'Escape') {
       e.preventDefault()
+      e.stopPropagation()
       setUserPickerOpen(false)
       return
     }
@@ -448,23 +491,16 @@ export default function App() {
     }
   }
 
-  const skipUserEffectRef = useRef(true)
-
   useEffect(() => {
-    if (skipUserEffectRef.current) {
-      skipUserEffectRef.current = false
-      return
-    }
-    if (userEntryMode !== 'list') return
-    if (!gitlabUrl.trim() || !token.trim() || !username.trim() || !primaryStartDate) return
-
+    if (!canSubmit) return
     const id = window.setTimeout(() => {
       void loadStats()
     }, 0)
     return () => window.clearTimeout(id)
-    // Только смена выбора из списка / режима ввода — не при редактировании URL, токена и дат.
+    // Автозагрузка при старте (полная форма из localStorage) и при смене пользователя/режима.
+    // URL, токен и даты без смены этих полей не триггерят запрос — нужна кнопка «Показать статистику».
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [username, userEntryMode])
+  }, [username, userEntryMode, canSubmit])
 
   async function handleLoadUserList() {
     setUsersListError(null)
@@ -498,6 +534,7 @@ export default function App() {
       setError('Выберите сотрудника из списка.')
       return
     }
+    setSettingsOpen(false)
     await loadStats()
   }
 
@@ -524,239 +561,72 @@ export default function App() {
     return `${pr.startDate} — ${end}`
   }
 
+  const appBarContext = useMemo(() => {
+    if (!resolvedName) return null
+    let periodBit = ''
+    if (periodResults && periodResults.length === 1) {
+      periodBit = formatPeriodRangeShort(periodResults[0])
+    } else if (periodResults && periodResults.length > 1) {
+      periodBit = ruPeriodCountLabel(periodResults.length)
+    } else if (primaryStartDate && periodRows[0]) {
+      const row = periodRows[0]
+      const end = row.endDate.trim() || '…'
+      periodBit = `${row.startDate} — ${end}`
+    }
+    return {
+      name: resolveUserDisplayName(resolvedName) ?? resolvedName,
+      periodBit,
+    }
+  }, [resolvedName, periodResults, periodRows, primaryStartDate])
+
   const detailContextPeriod =
     detailPeriodId && periodResults ? periodResults.find((p) => p.id === detailPeriodId) : undefined
 
   return (
     <div className="shell">
-      <header className="hero">
-        <div className="hero-badge">GitLab</div>
-        <h1>Статистика активности</h1>
-        <p className="hero-lead">
-          Одобрения merge request и комментарии за выбранный период. Данные берутся из событий пользователя
-          через API GitLab (заголовок <code className="inline-code">X-Total</code>).
-        </p>
+      <header className="app-bar">
+        <div className="app-bar-inner">
+          <div className="app-bar-brand">
+            <span className="hero-badge">GitLab</span>
+            <h1 className="app-bar-title">Статистика активности</h1>
+          </div>
+          <div className="app-bar-actions">
+            {appBarContext ? (
+              <span
+                className="app-bar-summary"
+                title={[appBarContext.name, appBarContext.periodBit].filter(Boolean).join(' · ')}
+              >
+                <span className="app-bar-summary-name">{appBarContext.name}</span>
+                {appBarContext.periodBit ? (
+                  <>
+                    <span className="app-bar-summary-sep" aria-hidden>
+                      ·
+                    </span>
+                    <span className="app-bar-summary-period">{appBarContext.periodBit}</span>
+                  </>
+                ) : null}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              className="app-bar-settings-btn"
+              aria-expanded={settingsOpen}
+              aria-controls="settings-drawer"
+              onClick={() => setSettingsOpen(true)}
+            >
+              Параметры
+            </button>
+          </div>
+        </div>
       </header>
 
       <main className="main-area">
-        <div className="layout">
-        <section className="card form-card">
-          <form className="form" onSubmit={handleSubmit}>
-            <label className="field">
-              <span>Адрес GitLab</span>
-              <input
-                type="url"
-                inputMode="url"
-                autoComplete="url"
-                placeholder="https://gitlab.example.com"
-                value={gitlabUrl}
-                onChange={(e) => setGitlabUrl(e.target.value)}
-                required
-              />
-            </label>
-
-            <label className="field">
-              <span>Personal Access Token</span>
-              <input
-                type="password"
-                autoComplete="off"
-                placeholder="glpat-…"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                required
-              />
-            </label>
-
-            <div className="field">
-              <span>Сотрудник</span>
-              <div className="field-select-row">
-                {userEntryMode === 'list' ? (
-                  <div className="user-picker" ref={userPickerRef}>
-                    <button
-                      type="button"
-                      className="select-control user-picker-trigger"
-                      aria-expanded={userPickerOpen}
-                      aria-haspopup="listbox"
-                      id="user-picker-trigger"
-                      onClick={() => {
-                        setUserPickerOpen((o) => !o)
-                        if (!userPickerOpen) {
-                          setUserSearchQuery('')
-                          setUserListHighlight(0)
-                        }
-                      }}
-                    >
-                      <span className="user-picker-trigger-text">
-                        {username
-                          ? `${resolveUserDisplayName(username) ?? username} (${username})`
-                          : '— Выберите сотрудника —'}
-                      </span>
-                    </button>
-                    {userPickerOpen ? (
-                      <div className="user-picker-dropdown" role="listbox" aria-labelledby="user-picker-trigger">
-                        <input
-                          ref={userPickerSearchRef}
-                          type="search"
-                          className="user-picker-search"
-                          placeholder="Поиск по имени или логину…"
-                          value={userSearchQuery}
-                          onChange={(e) => {
-                            setUserSearchQuery(e.target.value)
-                            setUserListHighlight(0)
-                          }}
-                          onKeyDown={handleUserPickerSearchKeyDown}
-                          autoComplete="off"
-                          aria-label="Поиск по списку сотрудников"
-                        />
-                        <ul className="user-picker-options">
-                          {filteredSelectUsers.length === 0 ? (
-                            <li className="user-picker-empty" role="presentation">
-                              Нет совпадений — ниже можно перейти к ручному вводу логина.
-                            </li>
-                          ) : (
-                            filteredSelectUsers.map((u, i) => (
-                              <li key={u.username} role="none">
-                                <button
-                                  type="button"
-                                  role="option"
-                                  aria-selected={username === u.username}
-                                  className={`user-picker-option${i === safeListHighlight ? ' user-picker-option--active' : ''}`}
-                                  onMouseEnter={() => setUserListHighlight(i)}
-                                  onClick={() => selectUserFromList(u)}
-                                >
-                                  <span className="user-picker-option-name">{u.name}</span>
-                                  <span className="user-picker-option-login">({u.username})</span>
-                                </button>
-                              </li>
-                            ))
-                          )}
-                          <li role="none">
-                            <button
-                              type="button"
-                              role="option"
-                              className={`user-picker-option user-picker-option--other${safeListHighlight === userPickerOtherIndex ? ' user-picker-option--active' : ''}`}
-                              onMouseEnter={() => setUserListHighlight(userPickerOtherIndex)}
-                              onClick={pickOtherUser}
-                            >
-                              Другой пользователь…
-                            </button>
-                          </li>
-                        </ul>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <button type="button" className="select-control user-picker-trigger" onClick={backToUserList}>
-                    <span className="user-picker-trigger-text">← К списку сотрудников</span>
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn-inline"
-                  disabled={usersListLoading || !gitlabUrl.trim() || !token.trim()}
-                  onClick={() => void handleLoadUserList()}
-                >
-                  {usersListLoading ? 'Загрузка…' : 'Из GitLab'}
-                </button>
-              </div>
-              {usersListError ? (
-                <p className="field-inline-msg field-inline-msg--error" role="alert">
-                  {usersListError}
-                </p>
-              ) : null}
-              {usersListHint ? <p className="field-inline-msg hint">{usersListHint}</p> : null}
-            </div>
-
-            {userEntryMode === 'manual' ? (
-              <label className="field">
-                <span>Логин в GitLab</span>
-                <input
-                  type="text"
-                  autoComplete="username"
-                  placeholder="username"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  required
-                />
-              </label>
-            ) : null}
-
-            <div className="field periods-field">
-              <span>Периоды</span>
-              <p className="hint periods-hint">
-                По умолчанию один период. Можно добавить ещё — данные загрузятся для каждого заполненного диапазона
-                и появятся сравнительная таблица и отдельные графики.
-              </p>
-              <div className="period-rows">
-                {periodRows.map((row, index) => (
-                  <div key={row.id} className="period-row card-nested">
-                    <div className="period-row-head">
-                      <span className="period-row-title">{periodRowTitle(index)}</span>
-                      {index > 0 ? (
-                        <button
-                          type="button"
-                          className="btn-inline btn-danger-ghost"
-                          onClick={() => removePeriodRow(row.id)}
-                          aria-label={`Удалить ${periodRowTitle(index)}`}
-                        >
-                          Удалить
-                        </button>
-                      ) : null}
-                    </div>
-                    <div className="field-row">
-                      <label className="field">
-                        <span>Дата начала</span>
-                        <input
-                          type="date"
-                          value={row.startDate}
-                          onChange={(e) => updatePeriodRow(row.id, { startDate: e.target.value })}
-                          required={index === 0}
-                          aria-required={index === 0}
-                        />
-                      </label>
-                      <label className="field">
-                        <span>Дата конца</span>
-                        <input
-                          type="date"
-                          value={row.endDate}
-                          onChange={(e) => updatePeriodRow(row.id, { endDate: e.target.value })}
-                          aria-describedby={index === 0 ? 'end-date-hint' : undefined}
-                        />
-                        {index === 0 ? (
-                          <span id="end-date-hint" className="hint">
-                            Если не указать, используется сегодняшняя дата.
-                          </span>
-                        ) : (
-                          <span className="hint">Пустой конец — по сегодня.</span>
-                        )}
-                      </label>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <button type="button" className="btn-inline add-period-btn" onClick={addComparePeriod}>
-                + Добавить период для сравнения
-              </button>
-            </div>
-
-            <button className="submit" type="submit" disabled={!canSubmit || loading}>
-              {loading ? 'Загрузка…' : 'Показать статистику'}
-            </button>
-          </form>
-        </section>
-
-        <section className="results">
+        <div className="content-column">
+        <section className="results card results-panel">
           {error ? (
             <div className="notice notice-error" role="alert">
               {error}
             </div>
-          ) : null}
-
-          {resolvedName ? (
-            <p className="resolved">
-              Пользователь:{' '}
-              <strong>{resolveUserDisplayName(resolvedName) ?? `@${resolvedName}`}</strong>
-            </p>
           ) : null}
 
           {periodResults && periodResults.length > 0 ? (
@@ -768,15 +638,33 @@ export default function App() {
                     <table className="compare-table">
                       <thead>
                         <tr>
-                          <th scope="col">№</th>
-                          <th scope="col">Диапазон</th>
-                          <th scope="col">Дней</th>
-                          <th scope="col">Одобр.</th>
-                          <th scope="col">Комм.</th>
-                          <th scope="col">MR</th>
-                          <th scope="col">Стр. диффа</th>
-                          <th scope="col">Комм./одобр.</th>
-                          <th scope="col">Стр./комм.</th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.index}>
+                            №
+                          </th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.range}>
+                            Диапазон
+                          </th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.days}>
+                            Дней
+                          </th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.approved}>
+                            Одобр.
+                          </th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.commented}>
+                            Комм.
+                          </th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.mrsCreated}>
+                            MR
+                          </th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.diffLines}>
+                            Стр. диффа
+                          </th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.commPerAppr}>
+                            Комм./одобр.
+                          </th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.linesPerComm}>
+                            Стр./комм.
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
@@ -850,9 +738,9 @@ export default function App() {
             !error && (
               <div className="placeholder">
                 <p>
-                  Заполните форму слева. Параметры формы сохраняются в этом браузере (localStorage) и подставляются при
-                  следующем открытии. Если уже указаны GitLab, токен и основной период, статистика запросится сама при
-                  выборе сотрудника из списка; иначе нажмите «Показать статистику».
+                  Откройте «Параметры» вверху справа и заполните подключение к GitLab, сотрудника и периоды. Значения
+                  сохраняются в этом браузере (localStorage). Если уже всё указано и выбран сотрудник из списка,
+                  статистика подгрузится сама; иначе нажмите «Показать статистику» в панели.
                 </p>
               </div>
             )
@@ -939,11 +827,257 @@ export default function App() {
             ) : null}
           </section>
         ) : null}
+        <div
+          className={"settings-backdrop" + (settingsOpen ? " is-open" : "")}
+          aria-hidden={!settingsOpen}
+          onClick={() => setSettingsOpen(false)}
+        />
+        <div
+          id="settings-drawer"
+          className={"settings-drawer" + (settingsOpen ? " is-open" : "")}
+          role="dialog"
+          aria-modal="true"
+          aria-hidden={!settingsOpen}
+          aria-labelledby="settings-drawer-title"
+        >
+          <div className="settings-drawer-head">
+            <div>
+              <h2 className="settings-drawer-title" id="settings-drawer-title">
+                Параметры
+              </h2>
+              <p className="settings-drawer-lead">
+                Подключение к GitLab, сотрудник и периоды. Данные событий — через API (заголовок{' '}
+                <code className="inline-code">X-Total</code>).
+              </p>
+            </div>
+            <button
+              type="button"
+              className="settings-drawer-close"
+              onClick={() => setSettingsOpen(false)}
+            >
+              Закрыть
+            </button>
+          </div>
+          <div className="settings-drawer-body">
+            <form className="form" onSubmit={handleSubmit}>
+              <label className="field">
+              <span>Адрес GitLab</span>
+              <input
+              type="url"
+              inputMode="url"
+              autoComplete="url"
+              placeholder="https://gitlab.example.com"
+              value={gitlabUrl}
+              onChange={(e) => setGitlabUrl(e.target.value)}
+              required
+              />
+              </label>
+
+              <label className="field">
+              <span>Personal Access Token</span>
+              <input
+              type="password"
+              autoComplete="off"
+              placeholder="glpat-…"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              required
+              />
+              </label>
+
+              <div className="field">
+              <span>Сотрудник</span>
+              <div className="field-select-row">
+              {userEntryMode === 'list' ? (
+              <div className="user-picker" ref={userPickerRef}>
+              <button
+              type="button"
+              className="select-control user-picker-trigger"
+              aria-expanded={userPickerOpen}
+              aria-haspopup="listbox"
+              id="user-picker-trigger"
+              onClick={() => {
+              setUserPickerOpen((o) => !o)
+              if (!userPickerOpen) {
+              setUserSearchQuery('')
+              setUserListHighlight(0)
+              }
+              }}
+              >
+              <span className="user-picker-trigger-text">
+              {username
+              ? `${resolveUserDisplayName(username) ?? username} (${username})`
+              : '— Выберите сотрудника —'}
+              </span>
+              </button>
+              {userPickerOpen ? (
+              <div className="user-picker-dropdown" role="listbox" aria-labelledby="user-picker-trigger">
+              <input
+              ref={userPickerSearchRef}
+              type="search"
+              className="user-picker-search"
+              placeholder="Поиск по имени или логину…"
+              value={userSearchQuery}
+              onChange={(e) => {
+              setUserSearchQuery(e.target.value)
+              setUserListHighlight(0)
+              }}
+              onKeyDown={handleUserPickerSearchKeyDown}
+              autoComplete="off"
+              aria-label="Поиск по списку сотрудников"
+              />
+              <ul className="user-picker-options">
+              {filteredSelectUsers.length === 0 ? (
+              <li className="user-picker-empty" role="presentation">
+              Нет совпадений — ниже можно перейти к ручному вводу логина.
+              </li>
+              ) : (
+              filteredSelectUsers.map((u, i) => (
+              <li key={u.username} role="none">
+              <button
+              type="button"
+              role="option"
+              aria-selected={username === u.username}
+              className={`user-picker-option${i === safeListHighlight ? ' user-picker-option--active' : ''}`}
+              onMouseEnter={() => setUserListHighlight(i)}
+              onClick={() => selectUserFromList(u)}
+              >
+              <span className="user-picker-option-name">{u.name}</span>
+              <span className="user-picker-option-login">({u.username})</span>
+              </button>
+              </li>
+              ))
+              )}
+              <li role="none">
+              <button
+              type="button"
+              role="option"
+              className={`user-picker-option user-picker-option--other${safeListHighlight === userPickerOtherIndex ? ' user-picker-option--active' : ''}`}
+              onMouseEnter={() => setUserListHighlight(userPickerOtherIndex)}
+              onClick={pickOtherUser}
+              >
+              Другой пользователь…
+              </button>
+              </li>
+              </ul>
+              </div>
+              ) : null}
+              </div>
+              ) : (
+              <button type="button" className="select-control user-picker-trigger" onClick={backToUserList}>
+              <span className="user-picker-trigger-text">← К списку сотрудников</span>
+              </button>
+              )}
+              <button
+              type="button"
+              className="btn-inline"
+              disabled={usersListLoading || !gitlabUrl.trim() || !token.trim()}
+              onClick={() => void handleLoadUserList()}
+              >
+              {usersListLoading ? 'Загрузка…' : 'Из GitLab'}
+              </button>
+              </div>
+              {usersListError ? (
+              <p className="field-inline-msg field-inline-msg--error" role="alert">
+              {usersListError}
+              </p>
+              ) : null}
+              {usersListHint ? <p className="field-inline-msg hint">{usersListHint}</p> : null}
+              </div>
+
+              {userEntryMode === 'manual' ? (
+              <label className="field">
+              <span>Логин в GitLab</span>
+              <input
+              type="text"
+              autoComplete="username"
+              placeholder="username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+              />
+              </label>
+              ) : null}
+
+              <div className="field periods-field">
+              <span>Периоды</span>
+              <p className="hint periods-hint">
+              По умолчанию один период. Можно добавить ещё — данные загрузятся для каждого заполненного диапазона
+              и появятся сравнительная таблица и отдельные графики.
+              </p>
+              <div className="period-rows">
+              {periodRows.map((row, index) => (
+              <div key={row.id} className="period-row card-nested">
+              <div className="period-row-head">
+              <span className="period-row-title">{periodRowTitle(index)}</span>
+              {index > 0 ? (
+              <button
+              type="button"
+              className="btn-inline btn-danger-ghost"
+              onClick={() => removePeriodRow(row.id)}
+              aria-label={`Удалить ${periodRowTitle(index)}`}
+              >
+              Удалить
+              </button>
+              ) : null}
+              </div>
+              <div className="field-row">
+              <label className="field">
+              <span>Дата начала</span>
+              <input
+              type="date"
+              value={row.startDate}
+              onChange={(e) => updatePeriodRow(row.id, { startDate: e.target.value })}
+              required={index === 0}
+              aria-required={index === 0}
+              />
+              </label>
+              <label className="field">
+              <span>Дата конца</span>
+              <input
+              type="date"
+              value={row.endDate}
+              onChange={(e) => updatePeriodRow(row.id, { endDate: e.target.value })}
+              aria-describedby={index === 0 ? 'end-date-hint' : undefined}
+              />
+              {index === 0 ? (
+              <span id="end-date-hint" className="hint">
+              Если не указать, используется сегодняшняя дата.
+              </span>
+              ) : (
+              <span className="hint">Пустой конец — по сегодня.</span>
+              )}
+              </label>
+              </div>
+              </div>
+              ))}
+              </div>
+              <button type="button" className="btn-inline add-period-btn" onClick={addComparePeriod}>
+              + Добавить период для сравнения
+              </button>
+              </div>
+
+              <button className="submit" type="submit" disabled={!canSubmit || loading}>
+              {loading ? 'Загрузка…' : 'Показать статистику'}
+              </button>
+            </form>
+          </div>
+        </div>
+
       </main>
 
       <footer className="footer">
         <span>Локальный инструмент · API v4 · events, merge_requests</span>
       </footer>
+
+      {loading ? (
+        <div className="global-loading" role="status" aria-live="polite" aria-busy="true">
+          <div className="global-loading-inner">
+            <div className="global-loading-spinner" aria-hidden />
+            <span className="global-loading-label">Загрузка статистики…</span>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
