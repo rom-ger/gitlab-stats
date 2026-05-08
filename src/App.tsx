@@ -7,6 +7,7 @@ import {
   teamDisplayName,
 } from './teamPresets'
 import { ActivityByDayChart, type ActivitySeriesPoint } from './ActivityByDayChart'
+import { formatDayRu } from './chartDates'
 import './App.css'
 
 const formDefaults = getFormDefaultsFromEnv()
@@ -24,6 +25,37 @@ type Stats = {
   approved: string
   commented: string
   mrsCreated: string
+}
+
+type DayDetailItem = {
+  id: string
+  kind: 'approved' | 'commented' | 'mr_created'
+  title: string
+  createdAt: string
+  webUrl: string | null
+  commentBody?: string | null
+}
+
+function formatEventTime(iso: string): string {
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return '—'
+  return new Date(t).toLocaleTimeString('ru-RU', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+function dayDetailKindLabel(kind: DayDetailItem['kind']): string {
+  if (kind === 'mr_created') return 'MR'
+  if (kind === 'approved') return 'Одобрение'
+  return 'Комментарий'
+}
+
+function dayDetailKindClass(kind: DayDetailItem['kind']): string {
+  if (kind === 'mr_created') return 'day-detail-kind day-detail-kind--mr'
+  if (kind === 'approved') return 'day-detail-kind day-detail-kind--approved'
+  return 'day-detail-kind day-detail-kind--commented'
 }
 
 function padDateParts(y: number, m: number, d: number): { start: string; end: string } {
@@ -80,6 +112,9 @@ export default function App() {
   const [resolvedName, setResolvedName] = useState<string | null>(null)
   const [stats, setStats] = useState<Stats | null>(null)
   const [activityByDay, setActivityByDay] = useState<ActivitySeriesPoint[] | null>(null)
+  const [detailByDay, setDetailByDay] = useState<Record<string, DayDetailItem[]> | null>(null)
+  const [detailDay, setDetailDay] = useState<string | null>(null)
+  const [detailItems, setDetailItems] = useState<DayDetailItem[]>([])
 
   const canSubmit = useMemo(() => {
     return Boolean(gitlabUrl.trim() && token.trim() && username.trim() && startDate && endDate)
@@ -89,6 +124,9 @@ export default function App() {
     setError(null)
     setStats(null)
     setActivityByDay(null)
+    setDetailByDay(null)
+    setDetailDay(null)
+    setDetailItems([])
     setResolvedName(null)
 
     const range = rangeFromInputs(startDate, endDate)
@@ -144,6 +182,7 @@ export default function App() {
           approved: number[]
           commented: number[]
           mrsCreated: number[]
+          detailByDay: Record<string, DayDetailItem[]>
         }>('/api/activity-by-day', {
           gitlabUrl,
           token,
@@ -169,6 +208,7 @@ export default function App() {
         mrsCreated: byDayRes.mrsCreated[i] ?? 0,
       }))
       setActivityByDay(points)
+      setDetailByDay(byDayRes.detailByDay ?? {})
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Неизвестная ошибка.')
     } finally {
@@ -197,6 +237,16 @@ export default function App() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     await loadStats()
+  }
+
+  function closeDayDetail() {
+    setDetailDay(null)
+    setDetailItems([])
+  }
+
+  function openDayDetail(day: string) {
+    setDetailDay(day)
+    setDetailItems(detailByDay?.[day] ?? [])
   }
 
   return (
@@ -378,9 +428,60 @@ export default function App() {
             </h2>
             <p className="chart-lead">
               Распределение по календарным дням в часовом поясе браузера: созданные MR, одобрения и комментарии в
-              MR. Данные собираются постранично из GitLab (до 40 000 событий на каждый тип).
+              MR. Данные собираются постранично из GitLab (до 40 000 событий на каждый тип).{' '}
+              <strong>Клик по столбцу дня</strong> показывает тот же набор событий, что уже загружен для графика (без
+              повторного запроса).
             </p>
-            <ActivityByDayChart points={activityByDay} />
+            <ActivityByDayChart
+              points={activityByDay}
+              selectedDay={detailDay}
+              onDayClick={detailByDay != null ? openDayDetail : undefined}
+            />
+
+            {detailDay ? (
+              <div className="day-detail">
+                <div className="day-detail-head">
+                  <h3 className="day-detail-title">{formatDayRu(detailDay)}</h3>
+                  <button type="button" className="day-detail-close" onClick={closeDayDetail}>
+                    Закрыть
+                  </button>
+                </div>
+                <p className="day-detail-hint">
+                  Список событий за день совпадает с данными графика (одна загрузка с сервера). Ссылки ведут в GitLab.
+                </p>
+                {detailItems.length === 0 ? (
+                  <p className="day-detail-empty">За этот день событий не найдено.</p>
+                ) : (
+                  <ul className="day-detail-list">
+                    {detailItems.map((item) => (
+                      <li key={item.id} className="day-detail-item">
+                        <span className="day-detail-time">{formatEventTime(item.createdAt)}</span>
+                        <div className="day-detail-body">
+                          <div className="day-detail-line">
+                            <span className={dayDetailKindClass(item.kind)}>{dayDetailKindLabel(item.kind)}</span>
+                            {item.webUrl ? (
+                              <a
+                                className="day-detail-link"
+                                href={item.webUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                {item.title}
+                              </a>
+                            ) : (
+                              <span className="day-detail-text">{item.title}</span>
+                            )}
+                          </div>
+                          {item.kind === 'commented' && item.commentBody ? (
+                            <div className="day-detail-comment">{item.commentBody}</div>
+                          ) : null}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ) : null}
           </section>
         ) : null}
       </main>

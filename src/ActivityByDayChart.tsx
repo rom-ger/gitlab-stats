@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { formatDayRu } from './chartDates'
 
 export type ActivitySeriesPoint = {
   day: string
@@ -33,18 +34,6 @@ function maxVisibleInSeries(points: ActivitySeriesPoint[], visibility: Record<Se
   return m
 }
 
-function formatDayRu(ymd: string): string {
-  const [y, m, d] = ymd.split('-').map(Number)
-  if (!y || !m || !d) return ymd
-  const dt = new Date(y, m - 1, d)
-  return dt.toLocaleDateString('ru-RU', {
-    weekday: 'short',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  })
-}
-
 function tooltipPosition(clientX: number, clientY: number, rowCount: number): { left: number; top: number } {
   const pad = 12
   const w = 280
@@ -68,7 +57,15 @@ const defaultVisibility: Record<SeriesKey, boolean> = {
   commented: true,
 }
 
-export function ActivityByDayChart({ points }: { points: ActivitySeriesPoint[] }) {
+export function ActivityByDayChart({
+  points,
+  selectedDay = null,
+  onDayClick,
+}: {
+  points: ActivitySeriesPoint[]
+  selectedDay?: string | null
+  onDayClick?: (day: string) => void
+}) {
   const [hover, setHover] = useState<{
     point: ActivitySeriesPoint
     left: number
@@ -169,6 +166,7 @@ export function ActivityByDayChart({ points }: { points: ActivitySeriesPoint[] }
         {points.map((p, i) => {
           const colX = padL + i * groupW
           const isHot = hover?.point.day === p.day
+          const isSelected = selectedDay === p.day
           const barStartX = colX + (groupW - clusterW) / 2
 
           return (
@@ -217,8 +215,23 @@ export function ActivityByDayChart({ points }: { points: ActivitySeriesPoint[] }
                 </text>
               ) : null}
 
+              {isSelected ? (
+                <rect
+                  x={colX + 0.5}
+                  y={padT}
+                  width={groupW - 1}
+                  height={y0 - padT}
+                  fill="none"
+                  stroke="var(--accent-soft)"
+                  strokeWidth={1.5}
+                  rx={4}
+                  opacity={0.95}
+                  pointerEvents="none"
+                />
+              ) : null}
+
               <rect
-                className="activity-chart-hit"
+                className={`activity-chart-hit${onDayClick ? ' activity-chart-hit--clickable' : ''}`}
                 x={colX}
                 y={padT}
                 width={groupW}
@@ -233,6 +246,10 @@ export function ActivityByDayChart({ points }: { points: ActivitySeriesPoint[] }
                   setHover({ point: p, left, top })
                 }}
                 onMouseLeave={() => setHover(null)}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onDayClick?.(p.day)
+                }}
               />
             </g>
           )
