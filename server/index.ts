@@ -563,6 +563,23 @@ function uniqueApprovedMergeRequestTargets(approvedList: GitlabItem[]): { pid: n
   return out
 }
 
+/** Уникальные MR из списка /merge_requests (project_id + iid). */
+function uniqueMergeRequestTargetsFromMrList(mrList: GitlabItem[]): { pid: number; iid: number }[] {
+  const seen = new Set<string>()
+  const out: { pid: number; iid: number }[] = []
+  for (const row of mrList) {
+    const m = asRecord(row)
+    const pid = asPositiveInt(m['project_id'])
+    const iid = asPositiveInt(m['iid'])
+    if (pid == null || iid == null) continue
+    const key = mrTargetKey(pid, iid)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ pid, iid })
+  }
+  return out
+}
+
 function parseUnidiffLineStats(diff: string): { additions: number; deletions: number } {
   let additions = 0
   let deletions = 0
@@ -683,30 +700,47 @@ async function fetchMrDiffLineTotal(
   return rest != null ? rest : 0
 }
 
-async function approvedMergeRequestDiffLinesByKey(
+/**
+ * Считает дифф по MR для детализации и сводки: объединяет уникальные MR из одобрений и из списка созданных,
+ * чтобы не дублировать запросы; сумма approvedMrsDiffLinesTotal — только по MR из одобрений (как раньше).
+ */
+async function mergeRequestDiffLinesForApprovedTotalAndDetail(
   base: string,
   token: string,
   paths: Map<number, string>,
   approvedList: GitlabItem[],
-): Promise<{ total: number; byKey: Map<string, number> }> {
-  const targets = uniqueApprovedMergeRequestTargets(approvedList)
+  mrList: GitlabItem[],
+): Promise<{ approvedMrsDiffLinesTotal: number; byKey: Map<string, number> }> {
+  const approvedTargets = uniqueApprovedMergeRequestTargets(approvedList)
+  const createdTargets = uniqueMergeRequestTargetsFromMrList(mrList)
+  const seen = new Set<string>()
+  const fetchTargets: { pid: number; iid: number }[] = []
+  for (const t of [...approvedTargets, ...createdTargets]) {
+    const k = mrTargetKey(t.pid, t.iid)
+    if (seen.has(k)) continue
+    seen.add(k)
+    fetchTargets.push(t)
+  }
+
   const byKey = new Map<string, number>()
-  let total = 0
   const chunkSize = 10
-  for (let i = 0; i < targets.length; i += chunkSize) {
-    const chunk = targets.slice(i, i + chunkSize)
+  for (let i = 0; i < fetchTargets.length; i += chunkSize) {
+    const chunk = fetchTargets.slice(i, i + chunkSize)
     const parts = await Promise.all(
       chunk.map(({ pid, iid }) => fetchMrDiffLineTotal(base, token, paths, pid, iid)),
     )
     for (let j = 0; j < chunk.length; j++) {
       const { pid, iid } = chunk[j]
-      const n = parts[j]
-      const key = `${pid}:${iid}`
-      byKey.set(key, n)
-      total += n
+      byKey.set(mrTargetKey(pid, iid), parts[j])
     }
   }
-  return { total, byKey }
+
+  let approvedMrsDiffLinesTotal = 0
+  for (const t of approvedTargets) {
+    approvedMrsDiffLinesTotal += byKey.get(mrTargetKey(t.pid, t.iid)) ?? 0
+  }
+
+  return { approvedMrsDiffLinesTotal, byKey }
 }
 
 function dedupEventsById(rows: GitlabItem[]): GitlabItem[] {
@@ -787,7 +821,7 @@ function buildDetailByDay(
   approvedList: GitlabItem[],
   commentedList: GitlabItem[],
   mrList: GitlabItem[],
-  approvedMrDiffByKey: ReadonlyMap<string, number>,
+  mrDiffLinesByKey: ReadonlyMap<string, number>,
   commentWebUrlByEventId?: Map<number, string>,
 ): Record<string, DayDetailItem[]> {
   const daySet = new Set(days)
@@ -812,8 +846,8 @@ function buildDetailByDay(
       pid != null && targetIid != null ? mrTargetKey(pid, targetIid) : null
     const fromTarget = tryReadMrLineStatsFromEventTarget(e)
     let mrDiffLines: number | null = null
-    if (key != null && approvedMrDiffByKey.has(key)) {
-      mrDiffLines = approvedMrDiffByKey.get(key)!
+    if (key != null && mrDiffLinesByKey.has(key)) {
+      mrDiffLines = mrDiffLinesByKey.get(key)!
     } else if (fromTarget != null) {
       mrDiffLines = fromTarget
     }
@@ -846,7 +880,7 @@ function buildDetailByDay(
     let mrDiffLines: number | null = null
     if (meta?.mrIid != null) {
       const k = mrTargetKey(meta.pid, meta.mrIid)
-      if (approvedMrDiffByKey.has(k)) mrDiffLines = approvedMrDiffByKey.get(k)!
+      if (mrDiffLinesByKey.has(k)) mrDiffLines = mrDiffLinesByKey.get(k)!
     }
     if (mrDiffLines == null) {
       mrDiffLines =
@@ -872,7 +906,16 @@ function buildDetailByDay(
     const created = m['created_at']
     const title = m['title']
     const web = m['web_url']
+    const pid = asPositiveInt(m['project_id'])
+    const iid = asPositiveInt(m['iid'])
+    const mapKey = pid != null && iid != null ? mrTargetKey(pid, iid) : null
     const { lines: listLines, files: listFiles } = readMrSizeFromMergeRequestListItem(m)
+    let mrDiffLines: number | null = null
+    if (mapKey != null && mrDiffLinesByKey.has(mapKey)) {
+      mrDiffLines = mrDiffLinesByKey.get(mapKey)!
+    } else if (listLines != null) {
+      mrDiffLines = listLines
+    }
     out[dk].push({
       id: `mr-${typeof id === 'number' ? id : `${dk}-${out[dk].length}`}`,
       kind: 'mr_created',
@@ -880,7 +923,7 @@ function buildDetailByDay(
       createdAt: typeof created === 'string' ? created : '',
       webUrl: typeof web === 'string' && /^https?:\/\//i.test(web) ? web : null,
       commentBody: null,
-      mrDiffLines: listLines,
+      mrDiffLines,
       mrChangesCount: listFiles,
     })
   }
@@ -1269,12 +1312,12 @@ app.post('/api/activity-by-day', async (req, res) => {
   }
 
   const paths = await fetchProjectPaths(base, token.trim(), projectIds)
-  const [approvedDiffBundle, commentWebUrlByEventId] = await Promise.all([
-    approvedMergeRequestDiffLinesByKey(base, token.trim(), paths, approvedList),
+  const [diffBundle, commentWebUrlByEventId] = await Promise.all([
+    mergeRequestDiffLinesForApprovedTotalAndDetail(base, token.trim(), paths, approvedList, mrList),
     enrichCommentedWebUrls(base, token.trim(), paths, commentedList),
   ])
-  const approvedMrsDiffLinesTotal = approvedDiffBundle.total
-  const approvedMrDiffByKey = approvedDiffBundle.byKey
+  const approvedMrsDiffLinesTotal = diffBundle.approvedMrsDiffLinesTotal
+  const mrDiffLinesByKey = diffBundle.byKey
   const foreignMrCommentCount = commentedList.length
   const avgLinesPerComment =
     foreignMrCommentCount > 0 ? approvedMrsDiffLinesTotal / foreignMrCommentCount : null
@@ -1286,7 +1329,7 @@ app.post('/api/activity-by-day', async (req, res) => {
     approvedList,
     commentedList,
     mrList,
-    approvedMrDiffByKey,
+    mrDiffLinesByKey,
     commentWebUrlByEventId,
   )
 
