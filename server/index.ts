@@ -40,6 +40,8 @@ async function gitlabFetch(
 
 const PER_PAGE = 100
 const MAX_LIST_PAGES = 400
+/** Пагинация GET /users — верхняя граница страниц (100 пользователей на страницу). */
+const MAX_USER_LIST_PAGES = 200
 
 function compareYmd(a: string, b: string): number {
   if (a < b) return -1
@@ -906,6 +908,67 @@ app.post('/api/resolve-user', async (req, res) => {
   }
 
   res.json({ id: user.id, username: user.username })
+})
+
+app.post('/api/list-users', async (req, res) => {
+  const gitlabUrl = req.body?.gitlabUrl as string | undefined
+  const token = req.body?.token as string | undefined
+
+  if (!gitlabUrl?.trim() || !token?.trim()) {
+    res.status(400).json({ error: 'Укажите URL GitLab и токен.' })
+    return
+  }
+
+  const base = normalizeBaseUrl(gitlabUrl)
+  const out: { username: string; name: string }[] = []
+  const seen = new Set<string>()
+
+  for (let page = 1; page <= MAX_USER_LIST_PAGES; page++) {
+    const p = new URLSearchParams({
+      per_page: String(PER_PAGE),
+      page: String(page),
+    })
+    const url = `${base}/api/v4/users?${p}`
+    let r: Response
+    try {
+      r = await gitlabFetch(url, token.trim(), 'GET')
+    } catch {
+      res.status(502).json({ error: 'Не удалось подключиться к GitLab.' })
+      return
+    }
+    if (!r.ok) {
+      const text = await r.text()
+      res.status(r.status >= 400 && r.status < 600 ? r.status : 502).json({
+        error: `GitLab ответил ${r.status}. ${text.slice(0, 400)}`,
+      })
+      return
+    }
+    let chunk: unknown
+    try {
+      chunk = await r.json()
+    } catch {
+      res.status(502).json({ error: 'Не удалось разобрать ответ GitLab.' })
+      return
+    }
+    if (!Array.isArray(chunk)) {
+      res.status(502).json({ error: 'Неожиданный ответ GitLab (ожидался массив пользователей).' })
+      return
+    }
+    for (const row of chunk) {
+      if (!row || typeof row !== 'object') continue
+      const o = row as Record<string, unknown>
+      const username = typeof o.username === 'string' ? o.username.trim() : ''
+      if (!username || seen.has(username)) continue
+      seen.add(username)
+      const rawName = typeof o.name === 'string' ? o.name.trim() : ''
+      const name = rawName || username
+      out.push({ username, name })
+    }
+    if (chunk.length < PER_PAGE) break
+  }
+
+  out.sort((a, b) => a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }))
+  res.json({ users: out, count: out.length })
 })
 
 app.post('/api/events-total', async (req, res) => {

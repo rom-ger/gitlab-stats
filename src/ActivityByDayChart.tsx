@@ -99,6 +99,10 @@ export function ActivityByDayChart({
       : 0
   const clusterW = visibleCount * barW + Math.max(0, visibleCount - 1) * innerGap
 
+  /** Плотность подписей по X: до ~24 отметок на ширину графика. */
+  const approxXLabelSlots = 24
+  const labelEvery = n <= approxXLabelSlots ? 1 : Math.max(1, Math.ceil(n / approxXLabelSlots))
+
   function yFor(v: number): number {
     return padT + innerH * (1 - v / yTop)
   }
@@ -108,8 +112,6 @@ export function ActivityByDayChart({
   const ticks = Array.from(
     new Set(Array.from({ length: tickCount + 1 }, (_, i) => Math.round((yTop * i) / tickCount))),
   ).sort((a, b) => a - b)
-
-  const labelEvery = n <= 14 ? 1 : n <= 31 ? 2 : n <= 62 ? 5 : Math.ceil(n / 12)
 
   function toggleSeries(key: SeriesKey) {
     setVisibility((prev) => {

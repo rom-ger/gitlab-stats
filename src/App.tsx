@@ -1,10 +1,8 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type FormEvent, type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { getFormDefaultsFromEnv } from './formEnvDefaults'
 import {
-  CUSTOM_SELECT_VALUE,
   TEAM_USERS,
   isPresetUsername,
-  teamDisplayName,
 } from './teamPresets'
 import { ActivityByDayChart, type ActivitySeriesPoint } from './ActivityByDayChart'
 import { formatDayRu } from './chartDates'
@@ -60,6 +58,14 @@ function dayDetailKindClass(kind: DayDetailItem['kind']): string {
   return 'day-detail-kind day-detail-kind--commented'
 }
 
+function todayLocalYmd(): string {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 function padDateParts(y: number, m: number, d: number): { start: string; end: string } {
   const startLocal = new Date(y, m - 1, d, 0, 0, 0, 0)
   const endLocal = new Date(y, m - 1, d, 23, 59, 59, 999)
@@ -70,9 +76,10 @@ function padDateParts(y: number, m: number, d: number): { start: string; end: st
 }
 
 function rangeFromInputs(startDate: string, endDate: string): { after: string; before: string } | null {
-  if (!startDate || !endDate) return null
+  if (!startDate?.trim()) return null
+  const endYmd = endDate?.trim() || todayLocalYmd()
   const [sy, sm, sd] = startDate.split('-').map(Number)
-  const [ey, em, ed] = endDate.split('-').map(Number)
+  const [ey, em, ed] = endYmd.split('-').map(Number)
   if (!sy || !sm || !sd || !ey || !em || !ed) return null
   const start = padDateParts(sy, sm, sd)
   const end = padDateParts(ey, em, ed)
@@ -107,6 +114,15 @@ export default function App() {
   const [token, setToken] = useState(formDefaults.token)
   const [username, setUsername] = useState(initialUser.username)
   const [userEntryMode, setUserEntryMode] = useState<'list' | 'manual'>(initialUser.userEntryMode)
+  const [fetchedUserList, setFetchedUserList] = useState<{ username: string; name: string }[] | null>(null)
+  const [usersListLoading, setUsersListLoading] = useState(false)
+  const [usersListHint, setUsersListHint] = useState<string | null>(null)
+  const [usersListError, setUsersListError] = useState<string | null>(null)
+  const [userPickerOpen, setUserPickerOpen] = useState(false)
+  const [userSearchQuery, setUserSearchQuery] = useState('')
+  const [userListHighlight, setUserListHighlight] = useState(0)
+  const userPickerRef = useRef<HTMLDivElement>(null)
+  const userPickerSearchRef = useRef<HTMLInputElement>(null)
   const [startDate, setStartDate] = useState(formDefaults.startDate)
   const [endDate, setEndDate] = useState(formDefaults.endDate)
   const [loading, setLoading] = useState(false)
@@ -119,8 +135,122 @@ export default function App() {
   const [detailItems, setDetailItems] = useState<DayDetailItem[]>([])
 
   const canSubmit = useMemo(() => {
-    return Boolean(gitlabUrl.trim() && token.trim() && username.trim() && startDate && endDate)
-  }, [gitlabUrl, token, username, startDate, endDate])
+    return Boolean(gitlabUrl.trim() && token.trim() && username.trim() && startDate.trim())
+  }, [gitlabUrl, token, username, startDate])
+
+  const mergedSelectUsers = useMemo(() => {
+    const m = new Map<string, { username: string; name: string }>()
+    for (const u of TEAM_USERS) m.set(u.username, { username: u.username, name: u.name })
+    if (fetchedUserList) {
+      for (const u of fetchedUserList) {
+        if (!m.has(u.username)) m.set(u.username, u)
+      }
+    }
+    return [...m.values()].sort((a, b) =>
+      (a.name || a.username).localeCompare(b.name || b.username, 'ru', { sensitivity: 'base' }),
+    )
+  }, [fetchedUserList])
+
+  const filteredSelectUsers = useMemo(() => {
+    const q = userSearchQuery.trim().toLowerCase()
+    if (!q) return mergedSelectUsers
+    return mergedSelectUsers.filter(
+      (u) => u.username.toLowerCase().includes(q) || u.name.toLowerCase().includes(q),
+    )
+  }, [mergedSelectUsers, userSearchQuery])
+
+  const userPickerOtherIndex =
+    filteredSelectUsers.length > 0 ? filteredSelectUsers.length : 0
+
+  const safeListHighlight = Math.min(userListHighlight, userPickerOtherIndex)
+
+  useEffect(() => {
+    if (!userPickerOpen) return
+    const id = requestAnimationFrame(() => userPickerSearchRef.current?.focus())
+    return () => cancelAnimationFrame(id)
+  }, [userPickerOpen])
+
+  useEffect(() => {
+    if (!userPickerOpen) return
+    function handlePointerDown(ev: MouseEvent) {
+      const root = userPickerRef.current
+      if (!root || !(ev.target instanceof Node) || root.contains(ev.target)) return
+      setUserPickerOpen(false)
+    }
+    document.addEventListener('mousedown', handlePointerDown)
+    return () => document.removeEventListener('mousedown', handlePointerDown)
+  }, [userPickerOpen])
+
+  function selectUserFromList(u: { username: string; name: string }) {
+    setUserEntryMode('list')
+    setUsername(u.username)
+    setUserPickerOpen(false)
+    setUserSearchQuery('')
+    setUserListHighlight(0)
+  }
+
+  function pickOtherUser() {
+    setUserEntryMode('manual')
+    setUsername('')
+    setUserPickerOpen(false)
+    setUserSearchQuery('')
+    setUserListHighlight(0)
+  }
+
+  function backToUserList() {
+    setUserEntryMode('list')
+    setUsername('')
+    setUserPickerOpen(false)
+    setUserSearchQuery('')
+    setUserListHighlight(0)
+  }
+
+  function confirmUserPickerSelection() {
+    const hi = safeListHighlight
+    const n = filteredSelectUsers.length
+    if (n === 0) {
+      pickOtherUser()
+      return
+    }
+    if (hi <= n - 1) {
+      selectUserFromList(filteredSelectUsers[hi])
+    } else {
+      pickOtherUser()
+    }
+  }
+
+  function handleUserPickerSearchKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      setUserPickerOpen(false)
+      return
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setUserListHighlight((h) =>
+        Math.min(Math.min(h, userPickerOtherIndex) + 1, userPickerOtherIndex),
+      )
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setUserListHighlight((h) => Math.max(Math.min(h, userPickerOtherIndex) - 1, 0))
+      return
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      confirmUserPickerSelection()
+    }
+  }
+
+  function resolveUserDisplayName(login: string | null): string | undefined {
+    if (!login) return undefined
+    const preset = TEAM_USERS.find((u) => u.username === login)
+    if (preset) return preset.name
+    const remote = fetchedUserList?.find((u) => u.username === login)
+    if (remote?.name) return remote.name
+    return login
+  }
 
   async function loadStats() {
     setError(null)
@@ -191,7 +321,7 @@ export default function App() {
           after: range.after,
           before: range.before,
           startDate,
-          endDate,
+          endDate: endDate.trim() || todayLocalYmd(),
           timeZone,
         }),
       ])
@@ -243,7 +373,7 @@ export default function App() {
       return
     }
     if (userEntryMode !== 'list') return
-    if (!gitlabUrl.trim() || !token.trim() || !username.trim() || !startDate || !endDate) return
+    if (!gitlabUrl.trim() || !token.trim() || !username.trim() || !startDate.trim()) return
 
     const id = window.setTimeout(() => {
       void loadStats()
@@ -253,8 +383,38 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username, userEntryMode])
 
+  async function handleLoadUserList() {
+    setUsersListError(null)
+    setUsersListHint(null)
+    if (!gitlabUrl.trim() || !token.trim()) {
+      setUsersListError('Сначала укажите адрес GitLab и токен.')
+      return
+    }
+    setUsersListLoading(true)
+    try {
+      const data = await postJson<{ users: { username: string; name: string }[]; count: number }>(
+        '/api/list-users',
+        { gitlabUrl, token },
+      )
+      setFetchedUserList(data.users)
+      setUsersListHint(
+        data.count > 0
+          ? `Из GitLab загружено ${data.count} пользователей; список объединён с пресетом команды.`
+          : 'GitLab вернул пустой список — возможно, у токена нет права читать пользователей.',
+      )
+    } catch (err) {
+      setUsersListError(err instanceof Error ? err.message : 'Не удалось загрузить список')
+    } finally {
+      setUsersListLoading(false)
+    }
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
+    if (userEntryMode === 'list' && !username.trim()) {
+      setError('Выберите сотрудника из списка.')
+      return
+    }
     await loadStats()
   }
 
@@ -308,33 +468,105 @@ export default function App() {
               />
             </label>
 
-            <label className="field">
+            <div className="field">
               <span>Сотрудник</span>
-              <select
-                className="select-control"
-                aria-label="Сотрудник из списка"
-                value={userEntryMode === 'manual' ? CUSTOM_SELECT_VALUE : username}
-                onChange={(e) => {
-                  const v = e.target.value
-                  if (v === CUSTOM_SELECT_VALUE) {
-                    setUserEntryMode('manual')
-                    setUsername('')
-                    return
-                  }
-                  setUserEntryMode('list')
-                  setUsername(v)
-                }}
-                required={userEntryMode === 'list'}
-              >
-                <option value="">— Выберите из списка —</option>
-                {TEAM_USERS.map((u) => (
-                  <option key={u.username} value={u.username}>
-                    {u.name}
-                  </option>
-                ))}
-                <option value={CUSTOM_SELECT_VALUE}>Другой пользователь…</option>
-              </select>
-            </label>
+              <div className="field-select-row">
+                {userEntryMode === 'list' ? (
+                  <div className="user-picker" ref={userPickerRef}>
+                    <button
+                      type="button"
+                      className="select-control user-picker-trigger"
+                      aria-expanded={userPickerOpen}
+                      aria-haspopup="listbox"
+                      id="user-picker-trigger"
+                      onClick={() => {
+                        setUserPickerOpen((o) => !o)
+                        if (!userPickerOpen) {
+                          setUserSearchQuery('')
+                          setUserListHighlight(0)
+                        }
+                      }}
+                    >
+                      <span className="user-picker-trigger-text">
+                        {username
+                          ? `${resolveUserDisplayName(username) ?? username} (${username})`
+                          : '— Выберите сотрудника —'}
+                      </span>
+                    </button>
+                    {userPickerOpen ? (
+                      <div className="user-picker-dropdown" role="listbox" aria-labelledby="user-picker-trigger">
+                        <input
+                          ref={userPickerSearchRef}
+                          type="search"
+                          className="user-picker-search"
+                          placeholder="Поиск по имени или логину…"
+                          value={userSearchQuery}
+                          onChange={(e) => {
+                            setUserSearchQuery(e.target.value)
+                            setUserListHighlight(0)
+                          }}
+                          onKeyDown={handleUserPickerSearchKeyDown}
+                          autoComplete="off"
+                          aria-label="Поиск по списку сотрудников"
+                        />
+                        <ul className="user-picker-options">
+                          {filteredSelectUsers.length === 0 ? (
+                            <li className="user-picker-empty" role="presentation">
+                              Нет совпадений — ниже можно перейти к ручному вводу логина.
+                            </li>
+                          ) : (
+                            filteredSelectUsers.map((u, i) => (
+                              <li key={u.username} role="none">
+                                <button
+                                  type="button"
+                                  role="option"
+                                  aria-selected={username === u.username}
+                                  className={`user-picker-option${i === safeListHighlight ? ' user-picker-option--active' : ''}`}
+                                  onMouseEnter={() => setUserListHighlight(i)}
+                                  onClick={() => selectUserFromList(u)}
+                                >
+                                  <span className="user-picker-option-name">{u.name}</span>
+                                  <span className="user-picker-option-login">({u.username})</span>
+                                </button>
+                              </li>
+                            ))
+                          )}
+                          <li role="none">
+                            <button
+                              type="button"
+                              role="option"
+                              className={`user-picker-option user-picker-option--other${safeListHighlight === userPickerOtherIndex ? ' user-picker-option--active' : ''}`}
+                              onMouseEnter={() => setUserListHighlight(userPickerOtherIndex)}
+                              onClick={pickOtherUser}
+                            >
+                              Другой пользователь…
+                            </button>
+                          </li>
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <button type="button" className="select-control user-picker-trigger" onClick={backToUserList}>
+                    <span className="user-picker-trigger-text">← К списку сотрудников</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn-inline"
+                  disabled={usersListLoading || !gitlabUrl.trim() || !token.trim()}
+                  onClick={() => void handleLoadUserList()}
+                >
+                  {usersListLoading ? 'Загрузка…' : 'Из GitLab'}
+                </button>
+              </div>
+              {usersListError ? (
+                <p className="field-inline-msg field-inline-msg--error" role="alert">
+                  {usersListError}
+                </p>
+              ) : null}
+              {usersListHint ? <p className="field-inline-msg hint">{usersListHint}</p> : null}
+            </div>
 
             {userEntryMode === 'manual' ? (
               <label className="field">
@@ -366,8 +598,11 @@ export default function App() {
                   type="date"
                   value={endDate}
                   onChange={(e) => setEndDate(e.target.value)}
-                  required
+                  aria-describedby="end-date-hint"
                 />
+                <span id="end-date-hint" className="hint">
+                  Если не указать, используется сегодняшняя дата.
+                </span>
               </label>
             </div>
 
@@ -387,7 +622,7 @@ export default function App() {
           {resolvedName ? (
             <p className="resolved">
               Пользователь:{' '}
-              <strong>{teamDisplayName(resolvedName) ?? `@${resolvedName}`}</strong>
+              <strong>{resolveUserDisplayName(resolvedName) ?? `@${resolvedName}`}</strong>
             </p>
           ) : null}
 
