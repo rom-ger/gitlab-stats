@@ -256,6 +256,14 @@
   background: radial-gradient(circle at 90% 10%, #22d3ee 0%, transparent 55%);
 }
 
+.stat-diff-lines::before {
+  background: radial-gradient(circle at 90% 10%, #3fb950 0%, transparent 55%);
+}
+
+.stat-avg-lines::before {
+  background: radial-gradient(circle at 90% 10%, #a371f7 0%, transparent 55%);
+}
+
 .stat-label {
   font-size: 0.82rem;
   font-weight: 600;

@@ -25,6 +25,8 @@ type Stats = {
   approved: string
   commented: string
   mrsCreated: string
+  approvedMrsDiffLines: string
+  avgLinesPerComment: string
 }
 
 type DayDetailItem = {
@@ -179,6 +181,9 @@ export default function App() {
           commented: number[]
           mrsCreated: number[]
           detailByDay: Record<string, DayDetailItem[]>
+          approvedMrsDiffLinesTotal: number
+          foreignMrCommentCount: number
+          avgLinesPerComment: number | null
         }>('/api/activity-by-day', {
           gitlabUrl,
           token,
@@ -192,11 +197,27 @@ export default function App() {
       ])
 
       const commentedSum = byDayRes.commented.reduce((s, n) => s + (n ?? 0), 0)
+      const commentCount =
+        typeof byDayRes.foreignMrCommentCount === 'number' ? byDayRes.foreignMrCommentCount : commentedSum
+
+      const diffLinesTotal =
+        typeof byDayRes.approvedMrsDiffLinesTotal === 'number' && Number.isFinite(byDayRes.approvedMrsDiffLinesTotal)
+          ? byDayRes.approvedMrsDiffLinesTotal
+          : 0
+      const avgLines =
+        byDayRes.avgLinesPerComment != null && Number.isFinite(byDayRes.avgLinesPerComment)
+          ? byDayRes.avgLinesPerComment.toLocaleString('ru-RU', {
+              maximumFractionDigits: 1,
+              minimumFractionDigits: 0,
+            })
+          : '—'
 
       setStats({
         approved: approvedRes.total,
-        commented: String(commentedSum),
+        commented: String(commentCount),
         mrsCreated: mrsRes.total,
+        approvedMrsDiffLines: diffLinesTotal.toLocaleString('ru-RU'),
+        avgLinesPerComment: avgLines,
       })
 
       const points: ActivitySeriesPoint[] = byDayRes.days.map((day, i) => ({
@@ -404,6 +425,23 @@ export default function App() {
                   <p className="stat-caption">
                     Отношение таких комментариев к числу одобрений за период; при отсутствии одобрений —
                     «—»
+                  </p>
+                </article>
+                <article className="stat-card stat-diff-lines">
+                  <div className="stat-label">Строк диффа в одобрённых MR</div>
+                  <div className="stat-value">{stats.approvedMrsDiffLines}</div>
+                  <p className="stat-caption">
+                    Сумма добавленных и удалённых строк по диффу для <strong>уникальных</strong> merge request из
+                    событий approved (GraphQL <code>diffStatsSummary</code> или REST{' '}
+                    <code>/merge_requests/…/changes</code>).
+                  </p>
+                </article>
+                <article className="stat-card stat-avg-lines">
+                  <div className="stat-label">Строк диффа на 1 комментарий</div>
+                  <div className="stat-value stat-value--ratio">{stats.avgLinesPerComment}</div>
+                  <p className="stat-caption">
+                    Отношение суммы строк из предыдущей карточки к числу комментариев в <strong>чужих</strong> MR за тот
+                    же период; при отсутствии комментариев — «—».
                   </p>
                 </article>
               </div>

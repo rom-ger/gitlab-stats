@@ -535,6 +535,164 @@ async function filterOutCommentsOnOwnMergeRequests(
   return out
 }
 
+function uniqueApprovedMergeRequestTargets(approvedList: GitlabItem[]): { pid: number; iid: number }[] {
+  const seen = new Set<string>()
+  const out: { pid: number; iid: number }[] = []
+  for (const row of approvedList) {
+    const e = asRecord(row)
+    const tt = typeof e['target_type'] === 'string' ? e['target_type'].trim() : ''
+    const tl = tt.toLowerCase()
+    if (tt !== 'MergeRequest' && tl !== 'mergerequest' && tl !== 'merge_request') continue
+    const pid = asPositiveInt(e['project_id'])
+    const iid = asPositiveInt(e['target_iid'])
+    if (pid == null || iid == null) continue
+    const key = `${pid}:${iid}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ pid, iid })
+  }
+  return out
+}
+
+function parseUnidiffLineStats(diff: string): { additions: number; deletions: number } {
+  let additions = 0
+  let deletions = 0
+  for (const rawLine of diff.split('\n')) {
+    if (rawLine.startsWith('+++ ') || rawLine.startsWith('--- ')) continue
+    if (rawLine.startsWith('@@')) continue
+    if (rawLine.startsWith('+')) additions++
+    else if (rawLine.startsWith('-')) deletions++
+  }
+  return { additions, deletions }
+}
+
+async function fetchMrDiffLineTotalGraphql(
+  base: string,
+  token: string,
+  fullPath: string,
+  mrIid: number,
+): Promise<number | null> {
+  const query = `query GitlabStatsMrDiff($fullPath: ID!, $iid: String!) {
+    project(fullPath: $fullPath) {
+      mergeRequest(iid: $iid) {
+        diffStatsSummary { additions deletions }
+      }
+    }
+  }`
+  let r: Response
+  try {
+    r = await fetch(`${base}/api/graphql`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'PRIVATE-TOKEN': token,
+      },
+      body: JSON.stringify({
+        query,
+        variables: { fullPath, iid: String(mrIid) },
+      }),
+    })
+  } catch {
+    return null
+  }
+  if (!r.ok) return null
+  let j: unknown
+  try {
+    j = await r.json()
+  } catch {
+    return null
+  }
+  if (!j || typeof j !== 'object') return null
+  const obj = j as {
+    errors?: unknown
+    data?: {
+      project?: {
+        mergeRequest?: { diffStatsSummary?: { additions?: unknown; deletions?: unknown } | null } | null
+      } | null
+    }
+  }
+  if (Array.isArray(obj.errors) && obj.errors.length > 0) return null
+  const mr = obj.data?.project?.mergeRequest
+  if (mr == null) return null
+  const s = mr.diffStatsSummary
+  if (s == null || typeof s !== 'object') return null
+  const a = (s as Record<string, unknown>)['additions']
+  const d = (s as Record<string, unknown>)['deletions']
+  if (typeof a !== 'number' || typeof d !== 'number' || !Number.isFinite(a) || !Number.isFinite(d)) return null
+  const add = a >= 0 ? Math.trunc(a) : 0
+  const del = d >= 0 ? Math.trunc(d) : 0
+  return add + del
+}
+
+async function fetchMrDiffLineTotalFromChanges(
+  base: string,
+  token: string,
+  projectId: number,
+  mrIid: number,
+): Promise<number | null> {
+  const url = `${base}/api/v4/projects/${projectId}/merge_requests/${mrIid}/changes`
+  let r: Response
+  try {
+    r = await gitlabFetch(url, token, 'GET')
+  } catch {
+    return null
+  }
+  if (!r.ok) return null
+  let j: unknown
+  try {
+    j = await r.json()
+  } catch {
+    return null
+  }
+  if (!j || typeof j !== 'object') return null
+  const changes = (j as Record<string, unknown>)['changes']
+  if (!Array.isArray(changes)) return null
+  let sum = 0
+  for (const c of changes) {
+    if (!c || typeof c !== 'object') continue
+    const diff = (c as Record<string, unknown>)['diff']
+    if (typeof diff !== 'string' || !diff) continue
+    const { additions, deletions } = parseUnidiffLineStats(diff)
+    sum += additions + deletions
+  }
+  return sum
+}
+
+async function fetchMrDiffLineTotal(
+  base: string,
+  token: string,
+  paths: Map<number, string>,
+  pid: number,
+  iid: number,
+): Promise<number> {
+  const fullPath = paths.get(pid)
+  if (fullPath) {
+    const g = await fetchMrDiffLineTotalGraphql(base, token, fullPath, iid)
+    if (g != null) return g
+  }
+  const rest = await fetchMrDiffLineTotalFromChanges(base, token, pid, iid)
+  return rest != null ? rest : 0
+}
+
+async function sumDiffLinesForApprovedMergeRequests(
+  base: string,
+  token: string,
+  paths: Map<number, string>,
+  approvedList: GitlabItem[],
+): Promise<number> {
+  const targets = uniqueApprovedMergeRequestTargets(approvedList)
+  const chunkSize = 10
+  let total = 0
+  for (let i = 0; i < targets.length; i += chunkSize) {
+    const chunk = targets.slice(i, i + chunkSize)
+    const parts = await Promise.all(
+      chunk.map(({ pid, iid }) => fetchMrDiffLineTotal(base, token, paths, pid, iid)),
+    )
+    for (const n of parts) total += n
+  }
+  return total
+}
+
 function dedupEventsById(rows: GitlabItem[]): GitlabItem[] {
   const seen = new Set<number>()
   const out: GitlabItem[] = []
@@ -951,7 +1109,13 @@ app.post('/api/activity-by-day', async (req, res) => {
   }
 
   const paths = await fetchProjectPaths(base, token.trim(), projectIds)
-  const commentWebUrlByEventId = await enrichCommentedWebUrls(base, token.trim(), paths, commentedList)
+  const [approvedMrsDiffLinesTotal, commentWebUrlByEventId] = await Promise.all([
+    sumDiffLinesForApprovedMergeRequests(base, token.trim(), paths, approvedList),
+    enrichCommentedWebUrls(base, token.trim(), paths, commentedList),
+  ])
+  const foreignMrCommentCount = commentedList.length
+  const avgLinesPerComment =
+    foreignMrCommentCount > 0 ? approvedMrsDiffLinesTotal / foreignMrCommentCount : null
   const detailByDay = buildDetailByDay(
     base,
     paths,
@@ -963,7 +1127,17 @@ app.post('/api/activity-by-day', async (req, res) => {
     commentWebUrlByEventId,
   )
 
-  res.json({ days, approved, commented, mrsCreated, timeZone, detailByDay })
+  res.json({
+    days,
+    approved,
+    commented,
+    mrsCreated,
+    timeZone,
+    detailByDay,
+    approvedMrsDiffLinesTotal,
+    foreignMrCommentCount,
+    avgLinesPerComment,
+  })
 })
 
 if (isProd) {
