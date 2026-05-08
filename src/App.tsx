@@ -58,6 +58,10 @@ type DayDetailItem = {
   createdAt: string
   webUrl: string | null
   commentBody?: string | null
+  /** Сумма добавленных и удалённых строк в диффе MR, если известна из загрузки периода. */
+  mrDiffLines?: number | null
+  /** Число изменённых файлов (changes_count), если есть в ответе GitLab. */
+  mrChangesCount?: number | null
 }
 
 function formatEventTime(iso: string): string {
@@ -80,6 +84,41 @@ function dayDetailKindClass(kind: DayDetailItem['kind']): string {
   if (kind === 'mr_created') return 'day-detail-kind day-detail-kind--mr'
   if (kind === 'approved') return 'day-detail-kind day-detail-kind--approved'
   return 'day-detail-kind day-detail-kind--commented'
+}
+
+function formatRuChangedFiles(n: number): string {
+  const mod10 = n % 10
+  const mod100 = n % 100
+  const num = n.toLocaleString('ru-RU')
+  if (mod10 === 1 && mod100 !== 11) return `${num} файл`
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${num} файла`
+  return `${num} файлов`
+}
+
+/** Размер MR в строке детализации: только из уже полученных данных. */
+function dayDetailMrSizeBadge(item: DayDetailItem): { text: string; title: string } | null {
+  const lines =
+    item.mrDiffLines != null && Number.isFinite(item.mrDiffLines) ? Math.trunc(item.mrDiffLines) : null
+  const linePart = lines != null ? `±${lines.toLocaleString('ru-RU')} стр.` : null
+  const fc =
+    item.mrChangesCount != null && Number.isFinite(item.mrChangesCount)
+      ? Math.max(0, Math.trunc(item.mrChangesCount))
+      : null
+  const filePart = fc != null && fc > 0 ? formatRuChangedFiles(fc) : null
+  if (!linePart && !filePart) return null
+  const text = [linePart, filePart].filter(Boolean).join(' · ')
+  let title =
+    'Размер MR из ответов GitLab при загрузке периода (без отдельных запросов для этой таблицы).'
+  if (linePart && filePart) {
+    title =
+      'Строки диффа (добавления+удаления) и число изменённых файлов (changes_count), как в API.'
+  } else if (linePart) {
+    title =
+      'Сумма добавленных и удалённых строк в диффе. Для комментариев совпадает с MR из одобрений за период либо берётся из вложенных полей события, если GitLab их отдал.'
+  } else if (filePart) {
+    title = 'Число изменённых файлов по полю changes_count в объекте merge request.'
+  }
+  return { text, title }
 }
 
 function todayLocalYmd(): string {
@@ -790,13 +829,16 @@ export default function App() {
                   </button>
                 </div>
                 <p className="day-detail-hint">
-                  Список событий за день совпадает с данными графика. Ссылки ведут в GitLab.
+                  Список событий за день совпадает с данными графика. Ссылки ведут в GitLab. Размер MR (строки и/или
+                  файлы) показывается, если эти поля уже были в ответах API при загрузке периода.
                 </p>
                 {detailItems.length === 0 ? (
                   <p className="day-detail-empty">За этот день событий не найдено.</p>
                 ) : (
                   <ul className="day-detail-list">
-                    {detailItems.map((item) => (
+                    {detailItems.map((item) => {
+                      const sizeBadge = dayDetailMrSizeBadge(item)
+                      return (
                       <li key={item.id} className="day-detail-item">
                         <span className="day-detail-time">{formatEventTime(item.createdAt)}</span>
                         <div className="day-detail-body">
@@ -814,13 +856,19 @@ export default function App() {
                             ) : (
                               <span className="day-detail-text">{item.title}</span>
                             )}
+                            {sizeBadge ? (
+                              <span className="day-detail-mr-size" title={sizeBadge.title}>
+                                {sizeBadge.text}
+                              </span>
+                            ) : null}
                           </div>
                           {item.kind === 'commented' && item.commentBody ? (
                             <div className="day-detail-comment">{item.commentBody}</div>
                           ) : null}
                         </div>
                       </li>
-                    ))}
+                      )
+                    })}
                   </ul>
                 )}
               </div>

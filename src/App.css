@@ -1034,6 +1034,20 @@
   word-break: break-word;
 }
 
+.day-detail-mr-size {
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  padding: 0.15rem 0.45rem;
+  border-radius: 0.35rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+  cursor: help;
+  white-space: nowrap;
+}
+
 .periods-field {
   gap: 0.65rem;
 }

@@ -105,6 +105,13 @@ type DayDetailItem = {
   webUrl: string | null
   /** Полный текст комментария из GitLab (только kind === 'commented'). */
   commentBody: string | null
+  /**
+   * Сумма добавленных и удалённых строк в диффе MR, если уже посчитана при загрузке периода
+   * (одобрения и совпадение MR в комментариях) или пришла во вложенных полях события.
+   */
+  mrDiffLines: number | null
+  /** Число изменённых файлов из ответа GitLab (в т.ч. для созданных MR из списка). */
+  mrChangesCount: number | null
 }
 
 function isCommentedActionName(actionName: unknown): boolean {
@@ -676,23 +683,30 @@ async function fetchMrDiffLineTotal(
   return rest != null ? rest : 0
 }
 
-async function sumDiffLinesForApprovedMergeRequests(
+async function approvedMergeRequestDiffLinesByKey(
   base: string,
   token: string,
   paths: Map<number, string>,
   approvedList: GitlabItem[],
-): Promise<number> {
+): Promise<{ total: number; byKey: Map<string, number> }> {
   const targets = uniqueApprovedMergeRequestTargets(approvedList)
-  const chunkSize = 10
+  const byKey = new Map<string, number>()
   let total = 0
+  const chunkSize = 10
   for (let i = 0; i < targets.length; i += chunkSize) {
     const chunk = targets.slice(i, i + chunkSize)
     const parts = await Promise.all(
       chunk.map(({ pid, iid }) => fetchMrDiffLineTotal(base, token, paths, pid, iid)),
     )
-    for (const n of parts) total += n
+    for (let j = 0; j < chunk.length; j++) {
+      const { pid, iid } = chunk[j]
+      const n = parts[j]
+      const key = `${pid}:${iid}`
+      byKey.set(key, n)
+      total += n
+    }
   }
-  return total
+  return { total, byKey }
 }
 
 function dedupEventsById(rows: GitlabItem[]): GitlabItem[] {
@@ -707,6 +721,60 @@ function dedupEventsById(rows: GitlabItem[]): GitlabItem[] {
   return out
 }
 
+function mrTargetKey(projectId: number, mrIid: number): string {
+  return `${projectId}:${mrIid}`
+}
+
+function tryReadAdditionsDeletionsSum(o: Record<string, unknown>): number | null {
+  const a = o['additions']
+  const d = o['deletions']
+  const an = typeof a === 'number' && Number.isFinite(a) ? Math.max(0, Math.trunc(a)) : null
+  const dn = typeof d === 'number' && Number.isFinite(d) ? Math.max(0, Math.trunc(d)) : null
+  if (an == null || dn == null) return null
+  return an + dn
+}
+
+/** Поля additions/deletions во вложенном target события (если GitLab отдал). */
+function tryReadMrLineStatsFromEventTarget(e: Record<string, unknown>): number | null {
+  const t = e['target']
+  if (!t || typeof t !== 'object') return null
+  return tryReadAdditionsDeletionsSum(t as Record<string, unknown>)
+}
+
+/** additions/deletions во вложенном note.noteable для MR. */
+function tryReadMrLineStatsFromCommentNoteable(e: Record<string, unknown>): number | null {
+  const note = e['note']
+  if (!note || typeof note !== 'object') return null
+  const noteable = (note as Record<string, unknown>)['noteable']
+  if (!noteable || typeof noteable !== 'object') return null
+  const nb = noteable as Record<string, unknown>
+  const typ =
+    normalizeNoteableType(nb['type']) ??
+    normalizeNoteableType(nb['noteable_type']) ??
+    normalizeNoteableType((note as Record<string, unknown>)['noteable_type'])
+  if (typ !== 'MergeRequest') return null
+  return tryReadAdditionsDeletionsSum(nb)
+}
+
+function readChangesCountField(raw: unknown): number | null {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return Math.max(0, Math.trunc(raw))
+  if (typeof raw === 'string') {
+    const t = raw.trim()
+    if (/^\d+$/.test(t)) return Number.parseInt(t, 10)
+  }
+  return null
+}
+
+/** Размер созданного MR из объекта списка /merge_requests (без доп. запросов). */
+function readMrSizeFromMergeRequestListItem(m: Record<string, unknown>): {
+  lines: number | null
+  files: number | null
+} {
+  const lines = tryReadAdditionsDeletionsSum(m)
+  const files = readChangesCountField(m['changes_count'])
+  return { lines, files }
+}
+
 function sortDetailItemsDesc(items: DayDetailItem[]): void {
   items.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
 }
@@ -719,6 +787,7 @@ function buildDetailByDay(
   approvedList: GitlabItem[],
   commentedList: GitlabItem[],
   mrList: GitlabItem[],
+  approvedMrDiffByKey: ReadonlyMap<string, number>,
   commentWebUrlByEventId?: Map<number, string>,
 ): Record<string, DayDetailItem[]> {
   const daySet = new Set(days)
@@ -737,6 +806,17 @@ function buildDetailByDay(
     const e = asRecord(row)
     const id = e['id']
     const created = e['created_at']
+    const pid = asPositiveInt(e['project_id'])
+    const targetIid = asPositiveInt(e['target_iid'])
+    const key =
+      pid != null && targetIid != null ? mrTargetKey(pid, targetIid) : null
+    const fromTarget = tryReadMrLineStatsFromEventTarget(e)
+    let mrDiffLines: number | null = null
+    if (key != null && approvedMrDiffByKey.has(key)) {
+      mrDiffLines = approvedMrDiffByKey.get(key)!
+    } else if (fromTarget != null) {
+      mrDiffLines = fromTarget
+    }
     out[dk].push({
       id: `approved-${typeof id === 'number' ? id : `${dk}-${out[dk].length}`}`,
       kind: 'approved',
@@ -744,6 +824,8 @@ function buildDetailByDay(
       createdAt: typeof created === 'string' ? created : '',
       webUrl: eventWebUrl(base, paths, e),
       commentBody: null,
+      mrDiffLines,
+      mrChangesCount: null,
     })
   }
 
@@ -760,6 +842,16 @@ function buildDetailByDay(
       typeof override === 'string' && override.trim()
         ? override.trim()
         : eventWebUrl(base, paths, e)
+    const meta = mergeRequestCommentMeta(e)
+    let mrDiffLines: number | null = null
+    if (meta?.mrIid != null) {
+      const k = mrTargetKey(meta.pid, meta.mrIid)
+      if (approvedMrDiffByKey.has(k)) mrDiffLines = approvedMrDiffByKey.get(k)!
+    }
+    if (mrDiffLines == null) {
+      mrDiffLines =
+        tryReadMrLineStatsFromCommentNoteable(e) ?? tryReadMrLineStatsFromEventTarget(e)
+    }
     out[dk].push({
       id: `commented-${typeof id === 'number' ? id : `${dk}-${out[dk].length}`}`,
       kind: 'commented',
@@ -767,6 +859,8 @@ function buildDetailByDay(
       createdAt: typeof created === 'string' ? created : '',
       webUrl,
       commentBody: eventCommentBody(e),
+      mrDiffLines,
+      mrChangesCount: null,
     })
   }
 
@@ -778,6 +872,7 @@ function buildDetailByDay(
     const created = m['created_at']
     const title = m['title']
     const web = m['web_url']
+    const { lines: listLines, files: listFiles } = readMrSizeFromMergeRequestListItem(m)
     out[dk].push({
       id: `mr-${typeof id === 'number' ? id : `${dk}-${out[dk].length}`}`,
       kind: 'mr_created',
@@ -785,6 +880,8 @@ function buildDetailByDay(
       createdAt: typeof created === 'string' ? created : '',
       webUrl: typeof web === 'string' && /^https?:\/\//i.test(web) ? web : null,
       commentBody: null,
+      mrDiffLines: listLines,
+      mrChangesCount: listFiles,
     })
   }
 
@@ -1172,10 +1269,12 @@ app.post('/api/activity-by-day', async (req, res) => {
   }
 
   const paths = await fetchProjectPaths(base, token.trim(), projectIds)
-  const [approvedMrsDiffLinesTotal, commentWebUrlByEventId] = await Promise.all([
-    sumDiffLinesForApprovedMergeRequests(base, token.trim(), paths, approvedList),
+  const [approvedDiffBundle, commentWebUrlByEventId] = await Promise.all([
+    approvedMergeRequestDiffLinesByKey(base, token.trim(), paths, approvedList),
     enrichCommentedWebUrls(base, token.trim(), paths, commentedList),
   ])
+  const approvedMrsDiffLinesTotal = approvedDiffBundle.total
+  const approvedMrDiffByKey = approvedDiffBundle.byKey
   const foreignMrCommentCount = commentedList.length
   const avgLinesPerComment =
     foreignMrCommentCount > 0 ? approvedMrsDiffLinesTotal / foreignMrCommentCount : null
@@ -1187,6 +1286,7 @@ app.post('/api/activity-by-day', async (req, res) => {
     approvedList,
     commentedList,
     mrList,
+    approvedMrDiffByKey,
     commentWebUrlByEventId,
   )
 
