@@ -2,12 +2,15 @@
   min-height: 100svh;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: stretch;
+  width: 100%;
+  max-width: 100%;
   padding: clamp(1.25rem, 4vw, 2.5rem);
   box-sizing: border-box;
 }
 
 .hero {
+  align-self: center;
   text-align: center;
   max-width: 40rem;
   margin-bottom: 2rem;
@@ -56,8 +59,17 @@
   border: 1px solid var(--border);
 }
 
+.main-area {
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
 .layout {
   width: min(960px, 100%);
+  margin-inline: auto;
   display: grid;
   grid-template-columns: 1fr;
   gap: 1.5rem;
@@ -291,8 +303,183 @@
 }
 
 .footer {
+  align-self: center;
   margin-top: auto;
   padding-top: 2rem;
   font-size: 0.78rem;
   color: var(--text-muted);
+}
+
+.chart-card {
+  padding: 1.25rem 1.35rem 1.35rem;
+}
+
+/* На всю ширину окна: выходим из колонки и совпадаем с краями вьюпорта (с учётом safe-area). */
+.chart-fullwidth {
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  box-sizing: border-box;
+  padding-inline-start: max(env(safe-area-inset-left, 0px), clamp(1.25rem, 4vw, 2.5rem));
+  padding-inline-end: max(env(safe-area-inset-right, 0px), clamp(1.25rem, 4vw, 2.5rem));
+}
+
+.chart-title {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+  font-weight: 650;
+  color: var(--text-strong);
+  letter-spacing: -0.02em;
+}
+
+.chart-lead {
+  margin: 0 0 1rem;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.activity-chart {
+  position: relative;
+  width: 100%;
+}
+
+.activity-chart-hit {
+  cursor: crosshair;
+}
+
+.activity-chart-tooltip {
+  position: fixed;
+  z-index: 100;
+  min-width: 12rem;
+  max-width: min(20rem, calc(100vw - 1.5rem));
+  padding: 0.65rem 0.75rem 0.7rem;
+  pointer-events: none;
+  border-radius: 0.65rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.activity-chart-tooltip-date {
+  font-weight: 650;
+  color: var(--text-strong);
+  font-size: 0.86rem;
+  margin-bottom: 0.45rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.activity-chart-tooltip-rows {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.activity-chart-tooltip-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.activity-chart-tooltip-row dt {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 500;
+}
+
+.activity-chart-tooltip-row dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.activity-chart-tooltip-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.activity-chart-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  min-height: min(42vw, 320px);
+}
+
+.activity-chart-tick,
+.activity-chart-x {
+  fill: var(--text-muted);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+
+.activity-chart-legend {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.activity-chart-legend li {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.activity-chart-legend-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.35rem 0.55rem;
+  font: inherit;
+  font-size: inherit;
+  color: inherit;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface-2);
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    opacity 0.12s ease;
+}
+
+.activity-chart-legend-btn:hover {
+  border-color: var(--accent-border);
+  background: rgba(252, 163, 38, 0.08);
+}
+
+.activity-chart-legend-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.activity-chart-legend-btn--off {
+  opacity: 0.45;
+  text-decoration: line-through;
+  text-decoration-color: var(--text-muted);
+}
+
+.activity-chart-legend-btn--off .activity-chart-swatch {
+  opacity: 0.5;
+}
+
+.activity-chart-swatch {
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 2px;
+  flex-shrink: 0;
 }

@@ -6,6 +6,7 @@ import {
   isPresetUsername,
   teamDisplayName,
 } from './teamPresets'
+import { ActivityByDayChart, type ActivitySeriesPoint } from './ActivityByDayChart'
 import './App.css'
 
 const formDefaults = getFormDefaultsFromEnv()
@@ -78,6 +79,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [resolvedName, setResolvedName] = useState<string | null>(null)
   const [stats, setStats] = useState<Stats | null>(null)
+  const [activityByDay, setActivityByDay] = useState<ActivitySeriesPoint[] | null>(null)
 
   const canSubmit = useMemo(() => {
     return Boolean(gitlabUrl.trim() && token.trim() && username.trim() && startDate && endDate)
@@ -86,6 +88,7 @@ export default function App() {
   async function loadStats() {
     setError(null)
     setStats(null)
+    setActivityByDay(null)
     setResolvedName(null)
 
     const range = rangeFromInputs(startDate, endDate)
@@ -118,7 +121,9 @@ export default function App() {
         before: range.before,
       }
 
-      const [approvedRes, commentedRes, mrsRes] = await Promise.all([
+      const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+
+      const [approvedRes, commentedRes, mrsRes, byDayRes] = await Promise.all([
         postJson<{ total: string }>('/api/events-total', {
           ...basePayload,
           action: 'approved',
@@ -134,6 +139,21 @@ export default function App() {
           createdAfter: range.after,
           createdBefore: range.before,
         }),
+        postJson<{
+          days: string[]
+          approved: number[]
+          commented: number[]
+          mrsCreated: number[]
+        }>('/api/activity-by-day', {
+          gitlabUrl,
+          token,
+          userId: user.id,
+          after: range.after,
+          before: range.before,
+          startDate,
+          endDate,
+          timeZone,
+        }),
       ])
 
       setStats({
@@ -141,6 +161,14 @@ export default function App() {
         commented: commentedRes.total,
         mrsCreated: mrsRes.total,
       })
+
+      const points: ActivitySeriesPoint[] = byDayRes.days.map((day, i) => ({
+        day,
+        approved: byDayRes.approved[i] ?? 0,
+        commented: byDayRes.commented[i] ?? 0,
+        mrsCreated: byDayRes.mrsCreated[i] ?? 0,
+      }))
+      setActivityByDay(points)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Неизвестная ошибка.')
     } finally {
@@ -182,7 +210,8 @@ export default function App() {
         </p>
       </header>
 
-      <main className="layout">
+      <main className="main-area">
+        <div className="layout">
         <section className="card form-card">
           <form className="form" onSubmit={handleSubmit}>
             <label className="field">
@@ -296,35 +325,39 @@ export default function App() {
           ) : null}
 
           {stats ? (
-            <div className="stat-grid">
-              <article className="stat-card stat-approved">
-                <div className="stat-label">Одобренных MR</div>
-                <div className="stat-value">{stats.approved}</div>
-                <p className="stat-caption">События с действием approved</p>
-              </article>
-              <article className="stat-card stat-comments">
-                <div className="stat-label">Комментариев</div>
-                <div className="stat-value">{stats.commented}</div>
-                <p className="stat-caption">События с действием commented</p>
-              </article>
-              <article className="stat-card stat-created">
-                <div className="stat-label">Созданных MR</div>
-                <div className="stat-value">{stats.mrsCreated}</div>
-                <p className="stat-caption">
-                  MR с автором-пользователем, дата создания в выбранном периоде (API merge_requests, state=all)
-                </p>
-              </article>
-              <article className="stat-card stat-ratio">
-                <div className="stat-label">Комментариев на одно одобрение</div>
-                <div className="stat-value stat-value--ratio">
-                  {formatCommentsPerApproval(stats.approved, stats.commented)}
-                </div>
-                <p className="stat-caption">
-                  Отношение числа событий commented к approved за выбранный период; при отсутствии одобрений —
-                  «—»
-                </p>
-              </article>
-            </div>
+            <>
+              <div className="stat-grid">
+                <article className="stat-card stat-approved">
+                  <div className="stat-label">Одобренных MR</div>
+                  <div className="stat-value">{stats.approved}</div>
+                  <p className="stat-caption">События с действием approved</p>
+                </article>
+                <article className="stat-card stat-comments">
+                  <div className="stat-label">Комментариев</div>
+                  <div className="stat-value">{stats.commented}</div>
+                  <p className="stat-caption">События с действием commented</p>
+                </article>
+                <article className="stat-card stat-created">
+                  <div className="stat-label">Созданных MR</div>
+                  <div className="stat-value">{stats.mrsCreated}</div>
+                  <p className="stat-caption">
+                    MR с автором-пользователем, дата создания в выбранном периоде (API merge_requests,
+                    state=all)
+                  </p>
+                </article>
+                <article className="stat-card stat-ratio">
+                  <div className="stat-label">Комментариев на одно одобрение</div>
+                  <div className="stat-value stat-value--ratio">
+                    {formatCommentsPerApproval(stats.approved, stats.commented)}
+                  </div>
+                  <p className="stat-caption">
+                    Отношение числа событий commented к approved за выбранный период; при отсутствии одобрений —
+                    «—»
+                  </p>
+                </article>
+              </div>
+
+            </>
           ) : (
             !error && (
               <div className="placeholder">
@@ -336,6 +369,20 @@ export default function App() {
             )
           )}
         </section>
+        </div>
+
+        {stats && activityByDay && activityByDay.length > 0 ? (
+          <section className="chart-fullwidth card chart-card" aria-labelledby="activity-chart-title">
+            <h2 className="chart-title" id="activity-chart-title">
+              Активность по дням
+            </h2>
+            <p className="chart-lead">
+              Распределение по календарным дням в часовом поясе браузера: созданные MR, одобрения и комментарии в
+              MR. Данные собираются постранично из GitLab (до 40 000 событий на каждый тип).
+            </p>
+            <ActivityByDayChart points={activityByDay} />
+          </section>
+        ) : null}
       </main>
 
       <footer className="footer">
