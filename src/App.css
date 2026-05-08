@@ -91,6 +91,7 @@
 
 .form-card {
   padding: 1.35rem 1.35rem 1.5rem;
+  min-width: 0;
 }
 
 .form {
@@ -331,13 +332,24 @@
 
 .field-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 0.75rem;
+}
+
+/* Ячейки и date-input иначе не сжимаются (min-width: auto у grid-item). */
+.field-row > .field {
+  min-width: 0;
+}
+
+.field-row > .field input {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 
 @media (max-width: 520px) {
   .field-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -829,4 +841,132 @@
 .day-detail-text {
   color: var(--text-strong);
   word-break: break-word;
+}
+
+.periods-field {
+  gap: 0.65rem;
+}
+
+.periods-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.period-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.period-row.card-nested {
+  margin: 0;
+  padding: 0.85rem 0.95rem;
+  border-radius: 0.75rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  min-width: 0;
+  container-type: inline-size;
+  container-name: period-block;
+}
+
+@container period-block (max-width: 22rem) {
+  .field-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.period-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+
+.period-row-title {
+  font-size: 0.8rem;
+  font-weight: 650;
+  color: var(--text-strong);
+}
+
+.btn-danger-ghost {
+  color: #f85149;
+  border-color: rgba(248, 81, 73, 0.35);
+}
+
+.btn-danger-ghost:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.12);
+}
+
+.add-period-btn {
+  align-self: flex-start;
+  margin-top: 0.15rem;
+}
+
+.compare-wrap {
+  margin-bottom: 1.25rem;
+}
+
+.compare-heading {
+  margin: 0 0 0.65rem;
+  font-size: 1.05rem;
+  font-weight: 650;
+  color: var(--text-strong);
+}
+
+.compare-table-scroll {
+  overflow-x: auto;
+  border-radius: 0.65rem;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.compare-table th,
+.compare-table td {
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.compare-table th {
+  font-weight: 650;
+  color: var(--text-muted);
+  background: var(--surface);
+}
+
+.compare-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.compare-table tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.chart-period-block {
+  margin-top: 1.5rem;
+}
+
+.chart-period-block:first-of-type {
+  margin-top: 0.5rem;
+}
+
+.chart-period-title {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.day-detail-period {
+  font-weight: 500;
+  color: var(--text-muted);
 }
