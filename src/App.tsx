@@ -161,14 +161,10 @@ export default function App() {
 
       const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 
-      const [approvedRes, commentedRes, mrsRes, byDayRes] = await Promise.all([
+      const [approvedRes, mrsRes, byDayRes] = await Promise.all([
         postJson<{ total: string }>('/api/events-total', {
           ...basePayload,
           action: 'approved',
-        }),
-        postJson<{ total: string }>('/api/events-total', {
-          ...basePayload,
-          action: 'commented',
         }),
         postJson<{ total: string }>('/api/merge-requests-total', {
           gitlabUrl,
@@ -195,9 +191,11 @@ export default function App() {
         }),
       ])
 
+      const commentedSum = byDayRes.commented.reduce((s, n) => s + (n ?? 0), 0)
+
       setStats({
         approved: approvedRes.total,
-        commented: commentedRes.total,
+        commented: String(commentedSum),
         mrsCreated: mrsRes.total,
       })
 
@@ -385,7 +383,10 @@ export default function App() {
                 <article className="stat-card stat-comments">
                   <div className="stat-label">Комментариев</div>
                   <div className="stat-value">{stats.commented}</div>
-                  <p className="stat-caption">События с действием commented</p>
+                  <p className="stat-caption">
+                    Только комментарии в MR <strong>других</strong> авторов; ваши собственные MR не учитываются
+                    (как на графике).
+                  </p>
                 </article>
                 <article className="stat-card stat-created">
                   <div className="stat-label">Созданных MR</div>
@@ -401,7 +402,7 @@ export default function App() {
                     {formatCommentsPerApproval(stats.approved, stats.commented)}
                   </div>
                   <p className="stat-caption">
-                    Отношение числа событий commented к approved за выбранный период; при отсутствии одобрений —
+                    Отношение таких комментариев к числу одобрений за период; при отсутствии одобрений —
                     «—»
                   </p>
                 </article>
@@ -428,7 +429,8 @@ export default function App() {
             </h2>
             <p className="chart-lead">
               Распределение по календарным дням в часовом поясе браузера: созданные MR, одобрения и комментарии в
-              MR. Данные собираются постранично из GitLab (до 40 000 событий на каждый тип).{' '}
+              MR. Данные собираются постранично из GitLab (до 40 000 событий на каждый тип). Комментарии в графике —
+              только в <strong>чужих</strong> merge request.{' '}
               <strong>Клик по столбцу дня</strong> показывает тот же набор событий, что уже загружен для графика (без
               повторного запроса).
             </p>

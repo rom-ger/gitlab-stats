@@ -21,7 +21,7 @@ const SERIES_ORDER: SeriesKey[] = ['mrsCreated', 'approved', 'commented']
 const SERIES_LABEL: Record<SeriesKey, string> = {
   mrsCreated: 'Создание MR',
   approved: 'Одобрение MR',
-  commented: 'Комментарий в MR',
+  commented: 'Комментарий в чужом MR',
 }
 
 function maxVisibleInSeries(points: ActivitySeriesPoint[], visibility: Record<SeriesKey, boolean>): number {

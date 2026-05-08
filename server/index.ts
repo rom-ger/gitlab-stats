@@ -424,6 +424,117 @@ async function enrichCommentedWebUrls(
   return overrides
 }
 
+function readAuthorIdFromObject(author: unknown): number | null {
+  if (!author || typeof author !== 'object') return null
+  return asPositiveInt((author as Record<string, unknown>)['id'])
+}
+
+/** Метаданные комментария именно к merge request (не issue/snippet). */
+function mergeRequestCommentMeta(
+  e: Record<string, unknown>,
+): { pid: number; mrIid: number | null; embeddedAuthorId: number | null } | null {
+  const note = e['note']
+  if (!note || typeof note !== 'object') return null
+  const n = note as Record<string, unknown>
+
+  const noteableType =
+    normalizeNoteableType(n['noteable_type']) ??
+    (n['noteable'] && typeof n['noteable'] === 'object'
+      ? normalizeNoteableType((n['noteable'] as Record<string, unknown>)['type'])
+      : null)
+
+  if (noteableType !== 'MergeRequest') return null
+
+  const pid = asPositiveInt(e['project_id'])
+  if (pid == null) return null
+
+  let mrIid = asPositiveInt(n['noteable_iid'])
+  if (mrIid == null && n['noteable'] && typeof n['noteable'] === 'object') {
+    mrIid = asPositiveInt((n['noteable'] as Record<string, unknown>)['iid'])
+  }
+
+  let embeddedAuthorId: number | null = null
+  if (n['noteable'] && typeof n['noteable'] === 'object') {
+    embeddedAuthorId = readAuthorIdFromObject((n['noteable'] as Record<string, unknown>)['author'])
+  }
+
+  return { pid, mrIid, embeddedAuthorId }
+}
+
+async function fetchMergeRequestAuthorId(
+  base: string,
+  token: string,
+  projectId: number,
+  mrIid: number,
+): Promise<number | null> {
+  const url = `${base}/api/v4/projects/${projectId}/merge_requests/${mrIid}`
+  let r: Response
+  try {
+    r = await gitlabFetch(url, token, 'GET')
+  } catch {
+    return null
+  }
+  if (!r.ok) return null
+  let j: unknown
+  try {
+    j = await r.json()
+  } catch {
+    return null
+  }
+  if (!j || typeof j !== 'object') return null
+  return readAuthorIdFromObject((j as Record<string, unknown>)['author'])
+}
+
+/** Убирает комментарии к MR, автором которых является selfUserId. Остальные события (issue и т.д.) сохраняются. */
+async function filterOutCommentsOnOwnMergeRequests(
+  base: string,
+  token: string,
+  selfUserId: number,
+  rows: GitlabItem[],
+): Promise<GitlabItem[]> {
+  type Meta = NonNullable<ReturnType<typeof mergeRequestCommentMeta>>
+  const entries: { row: GitlabItem; meta: Meta | null }[] = rows.map((row) => ({
+    row,
+    meta: mergeRequestCommentMeta(asRecord(row)),
+  }))
+
+  const fetchKeys = new Map<string, { pid: number; iid: number }>()
+  for (const { meta } of entries) {
+    if (!meta) continue
+    if (meta.embeddedAuthorId != null) continue
+    if (meta.mrIid == null) continue
+    fetchKeys.set(`${meta.pid}:${meta.mrIid}`, { pid: meta.pid, iid: meta.mrIid })
+  }
+
+  const authorByFetchKey = new Map<string, number | null>()
+  const chunkSize = 12
+  const toFetch = [...fetchKeys.values()]
+  for (let i = 0; i < toFetch.length; i += chunkSize) {
+    await Promise.all(
+      toFetch.slice(i, i + chunkSize).map(async ({ pid, iid }) => {
+        const key = `${pid}:${iid}`
+        const aid = await fetchMergeRequestAuthorId(base, token, pid, iid)
+        authorByFetchKey.set(key, aid)
+      }),
+    )
+  }
+
+  const out: GitlabItem[] = []
+  for (const { row, meta } of entries) {
+    if (!meta) {
+      out.push(row)
+      continue
+    }
+    let authorId = meta.embeddedAuthorId
+    if (authorId == null && meta.mrIid != null) {
+      authorId = authorByFetchKey.get(`${meta.pid}:${meta.mrIid}`) ?? null
+    }
+    if (authorId != null && authorId === selfUserId) continue
+    out.push(row)
+  }
+  return out
+}
+
 function dedupEventsById(rows: GitlabItem[]): GitlabItem[] {
   const seen = new Set<number>()
   const out: GitlabItem[] = []
@@ -791,10 +902,16 @@ app.post('/api/activity-by-day', async (req, res) => {
   }
 
   const approvedList = approvedRes.items
-  const commentedMerged = dedupEventsById([
+  const commentedDeduped = dedupEventsById([
     ...commentedRes.items,
     ...noteRes.items.filter((row) => isCommentedActionName(asRecord(row)['action_name'])),
   ])
+  const commentedList = await filterOutCommentsOnOwnMergeRequests(
+    base,
+    token.trim(),
+    userId,
+    commentedDeduped,
+  )
   const mrList = mrRes.items
 
   const days = enumerateYmdInclusive(sd, ed)
@@ -818,11 +935,11 @@ app.post('/api/activity-by-day', async (req, res) => {
   }
 
   bump(approvedList, 'approved')
-  bump(commentedMerged, 'commented')
+  bump(commentedList, 'commented')
   bump(mrList, 'mrsCreated')
 
   const projectIds: number[] = []
-  for (const row of [...approvedList, ...commentedMerged]) {
+  for (const row of [...approvedList, ...commentedList]) {
     const e = asRecord(row)
     const pid = asPositiveInt(e['project_id'])
     if (pid != null) projectIds.push(pid)
@@ -834,14 +951,14 @@ app.post('/api/activity-by-day', async (req, res) => {
   }
 
   const paths = await fetchProjectPaths(base, token.trim(), projectIds)
-  const commentWebUrlByEventId = await enrichCommentedWebUrls(base, token.trim(), paths, commentedMerged)
+  const commentWebUrlByEventId = await enrichCommentedWebUrls(base, token.trim(), paths, commentedList)
   const detailByDay = buildDetailByDay(
     base,
     paths,
     days,
     timeZone,
     approvedList,
-    commentedMerged,
+    commentedList,
     mrList,
     commentWebUrlByEventId,
   )
