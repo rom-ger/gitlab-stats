@@ -306,7 +306,6 @@ export default function App() {
                 onChange={(e) => setToken(e.target.value)}
                 required
               />
-              <small className="hint">Токен отправляется только на локальный прокси, не в браузер GitLab.</small>
             </label>
 
             <label className="field">
@@ -335,7 +334,6 @@ export default function App() {
                 ))}
                 <option value={CUSTOM_SELECT_VALUE}>Другой пользователь…</option>
               </select>
-              <small className="hint">В списке отображаются только имена; логин подставляется автоматически.</small>
             </label>
 
             {userEntryMode === 'manual' ? (
@@ -405,16 +403,14 @@ export default function App() {
                   <div className="stat-label">Комментариев</div>
                   <div className="stat-value">{stats.commented}</div>
                   <p className="stat-caption">
-                    Только комментарии в MR <strong>других</strong> авторов; ваши собственные MR не учитываются
-                    (как на графике).
+                    Только комментарии в MR <strong>других</strong> авторов; ваши собственные MR не учитываются.
                   </p>
                 </article>
                 <article className="stat-card stat-created">
                   <div className="stat-label">Созданных MR</div>
                   <div className="stat-value">{stats.mrsCreated}</div>
                   <p className="stat-caption">
-                    MR с автором-пользователем, дата создания в выбранном периоде (API merge_requests,
-                    state=all)
+                    MR с автором-пользователем.
                   </p>
                 </article>
                 <article className="stat-card stat-ratio">
@@ -423,8 +419,7 @@ export default function App() {
                     {formatCommentsPerApproval(stats.approved, stats.commented)}
                   </div>
                   <p className="stat-caption">
-                    Отношение таких комментариев к числу одобрений за период; при отсутствии одобрений —
-                    «—»
+                    Отношение таких комментариев к числу одобрений за период;
                   </p>
                 </article>
                 <article className="stat-card stat-diff-lines">
@@ -432,8 +427,7 @@ export default function App() {
                   <div className="stat-value">{stats.approvedMrsDiffLines}</div>
                   <p className="stat-caption">
                     Сумма добавленных и удалённых строк по диффу для <strong>уникальных</strong> merge request из
-                    событий approved (GraphQL <code>diffStatsSummary</code> или REST{' '}
-                    <code>/merge_requests/…/changes</code>).
+                    событий approved.
                   </p>
                 </article>
                 <article className="stat-card stat-avg-lines">
@@ -441,7 +435,7 @@ export default function App() {
                   <div className="stat-value stat-value--ratio">{stats.avgLinesPerComment}</div>
                   <p className="stat-caption">
                     Отношение суммы строк из предыдущей карточки к числу комментариев в <strong>чужих</strong> MR за тот
-                    же период; при отсутствии комментариев — «—».
+                    же период;
                   </p>
                 </article>
               </div>
@@ -467,10 +461,7 @@ export default function App() {
             </h2>
             <p className="chart-lead">
               Распределение по календарным дням в часовом поясе браузера: созданные MR, одобрения и комментарии в
-              MR. Данные собираются постранично из GitLab (до 40 000 событий на каждый тип). Комментарии в графике —
-              только в <strong>чужих</strong> merge request.{' '}
-              <strong>Клик по столбцу дня</strong> показывает тот же набор событий, что уже загружен для графика (без
-              повторного запроса).
+              MR.
             </p>
             <ActivityByDayChart
               points={activityByDay}
@@ -487,7 +478,7 @@ export default function App() {
                   </button>
                 </div>
                 <p className="day-detail-hint">
-                  Список событий за день совпадает с данными графика (одна загрузка с сервера). Ссылки ведут в GitLab.
+                  Список событий за день совпадает с данными графика. Ссылки ведут в GitLab.
                 </p>
                 {detailItems.length === 0 ? (
                   <p className="day-detail-empty">За этот день событий не найдено.</p>
