@@ -1302,6 +1302,63 @@
   cursor: help;
 }
 
+.compare-table thead th.compare-th-sortable {
+  padding: 0;
+  vertical-align: bottom;
+}
+
+.compare-th-sort-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.35rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  box-sizing: border-box;
+  font: inherit;
+  font-weight: 650;
+  color: inherit;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  border-radius: 0.4rem;
+}
+
+.compare-th-sortable.compare-table-days-cell .compare-th-sort-btn {
+  justify-content: flex-end;
+}
+
+.compare-th-sort-btn:hover {
+  color: var(--text-strong);
+}
+
+.compare-th-sort-btn:focus-visible {
+  outline: 2px solid var(--accent-glow);
+  outline-offset: 1px;
+}
+
+.compare-th-sort-label {
+  min-width: 0;
+}
+
+.compare-th-sort-icon {
+  flex-shrink: 0;
+  opacity: 0.5;
+  font-size: 0.68rem;
+  line-height: 1;
+}
+
+.compare-th-sort-btn:hover .compare-th-sort-icon {
+  opacity: 0.9;
+}
+
+.compare-th-sort-icon--active {
+  opacity: 1;
+  color: var(--accent-soft);
+}
+
 .compare-table tbody td {
   background: #1a2332;
 }

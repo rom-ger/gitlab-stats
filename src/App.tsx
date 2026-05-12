@@ -1,6 +1,7 @@
 import {
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
   useEffect,
   useMemo,
   useRef,
@@ -84,6 +85,146 @@ type PeriodResult = {
   stats: Stats
   activityByDay: ActivitySeriesPoint[]
   detailByDay: Record<string, DayDetailItem[]>
+}
+
+type CompareTableSortKey =
+  | 'user'
+  | 'range'
+  | 'days'
+  | 'approved'
+  | 'approvedMrsDiffLines'
+  | 'commented'
+  | 'commPerAppr'
+  | 'linesPerComm'
+  | 'mrsCreated'
+  | 'createdMrsDiffLines'
+  | 'avgCreatedPerDay'
+  | 'avgCreatedPerMr'
+
+type CompareTableSort = { key: CompareTableSortKey; dir: 'asc' | 'desc' }
+
+const COMPARE_SORT_COL_LABELS: Record<CompareTableSortKey, string> = {
+  user: 'Сотрудник',
+  range: 'Диапазон',
+  days: 'Дней',
+  approved: 'Одобр.',
+  approvedMrsDiffLines: 'Стр. диффа (одобр.)',
+  commented: 'Комм.',
+  commPerAppr: 'Комм./одобр.',
+  linesPerComm: 'Стр./комм.',
+  mrsCreated: 'MR',
+  createdMrsDiffLines: 'Стр. диффа (созд.)',
+  avgCreatedPerDay: 'Ср. стр./день (созд.)',
+  avgCreatedPerMr: 'Ср. стр./MR (созд.)',
+}
+
+function parseRuNumericStat(raw: string): number | null {
+  const trimmed = raw.trim()
+  if (trimmed === '—' || trimmed === '') return null
+  const normalized = trimmed.replace(/\u00a0/g, '').replace(/\s/g, '').replace(',', '.')
+  const n = Number.parseFloat(normalized)
+  return Number.isFinite(n) ? n : null
+}
+
+function commPerApprNumeric(pr: PeriodResult): number | null {
+  const approved = Number.parseInt(pr.stats.approved, 10)
+  const commented = Number.parseInt(pr.stats.commented, 10)
+  if (!Number.isFinite(approved) || !Number.isFinite(commented)) return null
+  if (approved <= 0) return null
+  return commented / approved
+}
+
+function compareNullableNumbers(a: number | null, b: number | null): number {
+  if (a == null && b == null) return 0
+  if (a == null) return 1
+  if (b == null) return -1
+  if (a === b) return 0
+  return a < b ? -1 : 1
+}
+
+/** Сравнение по возрастанию: отрицательное значение, если строка `a` должна идти выше `b`. */
+function comparePeriodResultByKey(a: PeriodResult, b: PeriodResult, key: CompareTableSortKey): number {
+  switch (key) {
+    case 'user': {
+      const sa = `${a.userDisplayName}\u0000${a.userLogin}`.toLowerCase()
+      const sb = `${b.userDisplayName}\u0000${b.userLogin}`.toLowerCase()
+      return sa.localeCompare(sb, 'ru', { sensitivity: 'base' })
+    }
+    case 'range': {
+      const ta = Date.parse(a.startDate)
+      const tb = Date.parse(b.startDate)
+      const a0 = Number.isFinite(ta) ? ta : 0
+      const b0 = Number.isFinite(tb) ? tb : 0
+      if (a0 !== b0) return a0 < b0 ? -1 : 1
+      const ea = Date.parse(a.endEffectiveYmd)
+      const eb = Date.parse(b.endEffectiveYmd)
+      const a1 = Number.isFinite(ea) ? ea : 0
+      const b1 = Number.isFinite(eb) ? eb : 0
+      return a1 === b1 ? 0 : a1 < b1 ? -1 : 1
+    }
+    case 'days':
+      return a.activityByDay.length - b.activityByDay.length
+    case 'approved': {
+      const na = Number.parseInt(a.stats.approved, 10)
+      const nb = Number.parseInt(b.stats.approved, 10)
+      const a0 = Number.isFinite(na) ? na : 0
+      const b0 = Number.isFinite(nb) ? nb : 0
+      return a0 - b0
+    }
+    case 'approvedMrsDiffLines':
+      return compareNullableNumbers(
+        parseRuNumericStat(a.stats.approvedMrsDiffLines),
+        parseRuNumericStat(b.stats.approvedMrsDiffLines),
+      )
+    case 'commented': {
+      const na = Number.parseInt(a.stats.commented, 10)
+      const nb = Number.parseInt(b.stats.commented, 10)
+      const a0 = Number.isFinite(na) ? na : 0
+      const b0 = Number.isFinite(nb) ? nb : 0
+      return a0 - b0
+    }
+    case 'commPerAppr':
+      return compareNullableNumbers(commPerApprNumeric(a), commPerApprNumeric(b))
+    case 'linesPerComm':
+      return compareNullableNumbers(
+        parseRuNumericStat(a.stats.avgLinesPerComment),
+        parseRuNumericStat(b.stats.avgLinesPerComment),
+      )
+    case 'mrsCreated': {
+      const na = Number.parseInt(a.stats.mrsCreated, 10)
+      const nb = Number.parseInt(b.stats.mrsCreated, 10)
+      const a0 = Number.isFinite(na) ? na : 0
+      const b0 = Number.isFinite(nb) ? nb : 0
+      return a0 - b0
+    }
+    case 'createdMrsDiffLines':
+      return compareNullableNumbers(
+        parseRuNumericStat(a.stats.createdMrsDiffLines),
+        parseRuNumericStat(b.stats.createdMrsDiffLines),
+      )
+    case 'avgCreatedPerDay':
+      return compareNullableNumbers(
+        parseRuNumericStat(a.stats.avgCreatedMrsDiffLinesPerDay),
+        parseRuNumericStat(b.stats.avgCreatedMrsDiffLinesPerDay),
+      )
+    case 'avgCreatedPerMr':
+      return compareNullableNumbers(
+        parseRuNumericStat(a.stats.avgCreatedMrsDiffLinesPerMr),
+        parseRuNumericStat(b.stats.avgCreatedMrsDiffLinesPerMr),
+      )
+    default:
+      return 0
+  }
+}
+
+function sortComparePeriodResults(rows: PeriodResult[], sort: CompareTableSort | null): PeriodResult[] {
+  if (!sort || rows.length <= 1) return rows
+  const mul = sort.dir === 'asc' ? 1 : -1
+  return [...rows].sort((a, b) => {
+    const c = comparePeriodResultByKey(a, b, sort.key) * mul
+    if (c !== 0) return c
+    return a.chartKey.localeCompare(b.chartKey)
+  })
 }
 
 type UserResultsBundle = {
@@ -257,6 +398,7 @@ export default function App() {
     Record<string, Record<ActivitySeriesKey, boolean>>
   >({})
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [compareTableSort, setCompareTableSort] = useState<CompareTableSort | null>(null)
 
   const primaryStartDate = periodRows[0]?.startDate?.trim() ?? ''
 
@@ -603,6 +745,7 @@ export default function App() {
     setResolvedName(null)
     setCompareUserCount(0)
     setComparePeriodCount(0)
+    setCompareTableSort(null)
 
     if (!userRows[0]?.username?.trim()) {
       setError('Укажите основного сотрудника (первая строка в списке).')
@@ -847,6 +990,53 @@ export default function App() {
     return { uniform, n0, rows }
   }, [flatPeriodResults])
 
+  const sortedCompareTableRows = useMemo(
+    () => sortComparePeriodResults(flatPeriodResults, compareTableSort),
+    [flatPeriodResults, compareTableSort],
+  )
+
+  function renderCompareSortTh(
+    colKey: CompareTableSortKey,
+    className: string | undefined,
+    hint: string,
+    label: ReactNode,
+  ) {
+    const active = compareTableSort?.key === colKey
+    const dir = compareTableSort?.dir
+    const colTitle = COMPARE_SORT_COL_LABELS[colKey]
+    const sortState = active ? (dir === 'asc' ? 'по возрастанию' : 'по убыванию') : null
+    const ariaLabel = sortState
+      ? `Сортировка: ${colTitle}, ${sortState}. Нажмите, чтобы поменять порядок.`
+      : `Сортировать по колонке «${colTitle}»`
+    return (
+      <th
+        scope="col"
+        className={[className, 'compare-th-sortable'].filter(Boolean).join(' ')}
+        title={hint}
+        aria-sort={active ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+      >
+        <button
+          type="button"
+          className="compare-th-sort-btn"
+          onClick={() =>
+            setCompareTableSort((prev) =>
+              !prev || prev.key !== colKey ? { key: colKey, dir: 'asc' } : { key: colKey, dir: prev.dir === 'asc' ? 'desc' : 'asc' },
+            )
+          }
+          aria-label={ariaLabel}
+        >
+          <span className="compare-th-sort-label">{label}</span>
+          <span
+            className={`compare-th-sort-icon${active ? ' compare-th-sort-icon--active' : ''}`}
+            aria-hidden
+          >
+            {active ? (dir === 'asc' ? '↑' : '↓') : '↕'}
+          </span>
+        </button>
+      </th>
+    )
+  }
+
   return (
     <div className="shell">
       <header className="app-bar">
@@ -942,89 +1132,84 @@ export default function App() {
                     <table className="compare-table">
                       <thead>
                         <tr>
-                          {showCompareUserColumn ? (
-                            <th scope="col" className="compare-table-col-sticky" title={COMPARE_TABLE_COL_HINTS.user}>
-                              Сотрудник
-                            </th>
-                          ) : showComparePeriodColumn ? (
-                            <th
-                              scope="col"
-                              className="compare-table-col-sticky"
-                              title={COMPARE_TABLE_COL_HINTS.range}
-                            >
-                              Диапазон
-                            </th>
-                          ) : (
-                            <th
-                              scope="col"
-                              className="compare-table-col-sticky compare-table-review"
-                              title={COMPARE_TABLE_COL_HINTS.approved}
-                            >
-                              Одобр.
-                            </th>
+                          {showCompareUserColumn
+                            ? renderCompareSortTh('user', 'compare-table-col-sticky', COMPARE_TABLE_COL_HINTS.user, 'Сотрудник')
+                            : showComparePeriodColumn
+                              ? renderCompareSortTh(
+                                  'range',
+                                  'compare-table-col-sticky',
+                                  COMPARE_TABLE_COL_HINTS.range,
+                                  'Диапазон',
+                                )
+                              : renderCompareSortTh(
+                                  'approved',
+                                  'compare-table-col-sticky compare-table-review',
+                                  COMPARE_TABLE_COL_HINTS.approved,
+                                  'Одобр.',
+                                )}
+                          {showComparePeriodColumn
+                            ? renderCompareSortTh('days', 'compare-table-days-cell', COMPARE_TABLE_COL_HINTS.days, 'Дней')
+                            : null}
+                          {showCompareUserColumn || showComparePeriodColumn
+                            ? renderCompareSortTh(
+                                'approved',
+                                'compare-table-review',
+                                COMPARE_TABLE_COL_HINTS.approved,
+                                'Одобр.',
+                              )
+                            : null}
+                          {renderCompareSortTh(
+                            'approvedMrsDiffLines',
+                            'compare-table-review',
+                            COMPARE_TABLE_COL_HINTS.diffLines,
+                            'Стр. диффа (одобр.)',
                           )}
-                          {showComparePeriodColumn ? (
-                            <th scope="col" className="compare-table-days-cell" title={COMPARE_TABLE_COL_HINTS.days}>
-                              Дней
-                            </th>
-                          ) : null}
-                          {showCompareUserColumn || showComparePeriodColumn ? (
-                            <th
-                              scope="col"
-                              className="compare-table-review"
-                              title={COMPARE_TABLE_COL_HINTS.approved}
-                            >
-                              Одобр.
-                            </th>
-                          ) : null}
-                          <th
-                            scope="col"
-                            className="compare-table-review"
-                            title={COMPARE_TABLE_COL_HINTS.diffLines}
-                          >
-                            Стр. диффа (одобр.)
-                          </th>
-                          <th
-                            scope="col"
-                            className="compare-table-review"
-                            title={COMPARE_TABLE_COL_HINTS.commented}
-                          >
-                            Комм.
-                          </th>
-                          <th
-                            scope="col"
-                            className="compare-table-review"
-                            title={COMPARE_TABLE_COL_HINTS.commPerAppr}
-                          >
-                            Комм./одобр.
-                          </th>
-                          <th
-                            scope="col"
-                            className="compare-table-review"
-                            title={COMPARE_TABLE_COL_HINTS.linesPerComm}
-                          >
-                            Стр./комм.
-                          </th>
-                          <th
-                            scope="col"
-                            className="compare-table-metric-group-start"
-                            title={COMPARE_TABLE_COL_HINTS.mrsCreated}
-                          >
-                            MR
-                          </th>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.createdDiffLines}>
-                            Стр. диффа (созд.)
-                          </th>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.avgCreatedDiffPerDay}>
-                            Ср. стр./день (созд.)
-                          </th>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.avgCreatedDiffPerMr}>
-                            Ср. стр./MR (созд.)
-                          </th>
+                          {renderCompareSortTh(
+                            'commented',
+                            'compare-table-review',
+                            COMPARE_TABLE_COL_HINTS.commented,
+                            'Комм.',
+                          )}
+                          {renderCompareSortTh(
+                            'commPerAppr',
+                            'compare-table-review',
+                            COMPARE_TABLE_COL_HINTS.commPerAppr,
+                            'Комм./одобр.',
+                          )}
+                          {renderCompareSortTh(
+                            'linesPerComm',
+                            'compare-table-review',
+                            COMPARE_TABLE_COL_HINTS.linesPerComm,
+                            'Стр./комм.',
+                          )}
+                          {renderCompareSortTh(
+                            'mrsCreated',
+                            'compare-table-metric-group-start',
+                            COMPARE_TABLE_COL_HINTS.mrsCreated,
+                            'MR',
+                          )}
+                          {renderCompareSortTh(
+                            'createdMrsDiffLines',
+                            undefined,
+                            COMPARE_TABLE_COL_HINTS.createdDiffLines,
+                            'Стр. диффа (созд.)',
+                          )}
+                          {renderCompareSortTh(
+                            'avgCreatedPerDay',
+                            undefined,
+                            COMPARE_TABLE_COL_HINTS.avgCreatedDiffPerDay,
+                            'Ср. стр./день (созд.)',
+                          )}
+                          {renderCompareSortTh(
+                            'avgCreatedPerMr',
+                            undefined,
+                            COMPARE_TABLE_COL_HINTS.avgCreatedDiffPerMr,
+                            'Ср. стр./MR (созд.)',
+                          )}
                         </tr>
                       </thead>
                       <tbody>
-                        {flatPeriodResults.map((pr) => (
+                        {sortedCompareTableRows.map((pr) => (
                           <tr key={pr.chartKey}>
                             {showCompareUserColumn ? (
                               <td className="compare-table-col-sticky">
