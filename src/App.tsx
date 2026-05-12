@@ -73,6 +73,8 @@ const COMPARE_TABLE_COL_HINTS = {
     'Отношение числа комментариев в чужих MR к числу одобрений за тот же период (комментариев на одно одобрение).',
   linesPerComm:
     'Отношение суммы строк диффа в одобрённых MR к числу комментариев в чужих MR за период (строк на один комментарий).',
+  medianLinesPerCommentMr:
+    'Медиана по чужим MR: для MR с комментариями сотрудника — (строки диффа MR) / (число этих комментариев); для MR, где он только одобрил без комментариев, отношение считается 0. Учитываются все такие одобрения и комментарии в чужих MR. Собственные MR не входят.',
   effectiveness:
     'Эвристический индекс 0–100: комментарии в чужих MR (интенсивность и глубина), свой код в develop/dev; без числа одобрений и без размера чужих MR.',
 } as const
@@ -86,6 +88,7 @@ type Stats = {
   avgCreatedMrsDiffLinesPerDay: string
   avgCreatedMrsDiffLinesPerMr: string
   avgLinesPerComment: string
+  medianLinesPerCommentByMr: string
 }
 
 type PeriodResult = {
@@ -102,6 +105,8 @@ type PeriodResult = {
   stats: Stats
   activityByDay: ActivitySeriesPoint[]
   detailByDay: Record<string, DayDetailItem[]>
+  /** MR, вошедшие в медиану «стр./комм.»; сортировка с сервера — по убыванию стр./комм. пользователя. */
+  medianMrBreakdown: MedianMrBreakdownRow[]
 }
 
 type CompareTableSortKey =
@@ -113,6 +118,7 @@ type CompareTableSortKey =
   | 'commented'
   | 'commPerAppr'
   | 'linesPerComm'
+  | 'medianLinesPerCommMr'
   | 'mrsCreated'
   | 'createdMrsDiffLines'
   | 'avgCreatedPerDay'
@@ -130,6 +136,7 @@ const COMPARE_SORT_COL_LABELS: Record<CompareTableSortKey, string> = {
   commented: 'Комм.',
   commPerAppr: 'Комм./одобр.',
   linesPerComm: 'Стр./комм.',
+  medianLinesPerCommMr: 'Стр./комм. (мед.)',
   mrsCreated: 'MR',
   createdMrsDiffLines: 'Стр. диффа (созд.)',
   avgCreatedPerDay: 'Ср. стр./день (созд.)',
@@ -209,6 +216,11 @@ function comparePeriodResultByKey(a: PeriodResult, b: PeriodResult, key: Compare
         parseRuNumericStat(a.stats.avgLinesPerComment),
         parseRuNumericStat(b.stats.avgLinesPerComment),
       )
+    case 'medianLinesPerCommMr':
+      return compareNullableNumbers(
+        parseRuNumericStat(a.stats.medianLinesPerCommentByMr),
+        parseRuNumericStat(b.stats.medianLinesPerCommentByMr),
+      )
     case 'mrsCreated': {
       const na = Number.parseInt(a.stats.mrsCreated, 10)
       const nb = Number.parseInt(b.stats.mrsCreated, 10)
@@ -266,6 +278,57 @@ type DayDetailItem = {
   mrDiffLines?: number | null
   /** Число изменённых файлов (changes_count), если есть в ответе GitLab. */
   mrChangesCount?: number | null
+}
+
+/** Одна строка разбивки для медианы «стр./комм.» по MR (ответ /api/activity-by-day). */
+export type MedianMrBreakdownRow = {
+  projectId: number
+  iid: number
+  diffLines: number
+  userCommentCount: number
+  linesPerUserComment: number
+  webUrl: string | null
+  title: string | null
+  /** Поле user_notes_count из GitLab API: пользовательские заметки к MR (все авторы). */
+  totalUserNotesCount: number | null
+}
+
+function parseMedianMrBreakdown(raw: unknown): MedianMrBreakdownRow[] {
+  if (!Array.isArray(raw)) return []
+  const out: MedianMrBreakdownRow[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const projectId = Number(o.projectId)
+    const iid = Number(o.iid)
+    const diffLines = Number(o.diffLines)
+    const userCommentCount = Number(o.userCommentCount)
+    const linesPerUserComment = Number(o.linesPerUserComment)
+    if (!Number.isFinite(projectId) || !Number.isFinite(iid)) continue
+    if (
+      !Number.isFinite(diffLines) ||
+      !Number.isFinite(userCommentCount) ||
+      !Number.isFinite(linesPerUserComment)
+    ) {
+      continue
+    }
+    const webUrl = typeof o.webUrl === 'string' && o.webUrl.trim() ? o.webUrl.trim() : null
+    const title = typeof o.title === 'string' && o.title.trim() ? o.title.trim() : null
+    const tuc = o.totalUserNotesCount
+    const totalUserNotesCount =
+      typeof tuc === 'number' && Number.isFinite(tuc) ? Math.max(0, Math.trunc(tuc)) : null
+    out.push({
+      projectId: Math.trunc(projectId),
+      iid: Math.trunc(iid),
+      diffLines: Math.max(0, Math.trunc(diffLines)),
+      userCommentCount: Math.max(0, Math.trunc(userCommentCount)),
+      linesPerUserComment,
+      webUrl,
+      title,
+      totalUserNotesCount,
+    })
+  }
+  return out
 }
 
 function formatEventTime(iso: string): string {
@@ -420,6 +483,11 @@ export default function App() {
   >({})
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [compareTableSort, setCompareTableSort] = useState<CompareTableSort | null>(null)
+  const [medianMrModal, setMedianMrModal] = useState<{
+    title: string
+    subtitle?: string
+    rows: MedianMrBreakdownRow[]
+  } | null>(null)
 
   const primaryStartDate = periodRows[0]?.startDate?.trim() ?? ''
 
@@ -481,6 +549,20 @@ export default function App() {
       document.body.style.overflow = prevOverflow
     }
   }, [settingsOpen])
+
+  useEffect(() => {
+    if (!medianMrModal) return
+    function onKeyDown(ev: globalThis.KeyboardEvent) {
+      if (ev.key === 'Escape') setMedianMrModal(null)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = prevOverflow
+    }
+  }, [medianMrModal])
 
   const mergedSelectUsers = useMemo(() => {
     const m = new Map<string, { username: string; name: string }>()
@@ -660,6 +742,8 @@ export default function App() {
       createdMrsDiffLinesTotal?: number
       foreignMrCommentCount: number
       avgLinesPerComment: number | null
+      medianLinesPerCommentByMr?: number | null
+      medianLinesPerCommentMrBreakdown?: unknown
       approvedEventsTotal?: number
       mergeRequestsCreatedTotal?: number
     }>('/api/activity-by-day', {
@@ -720,6 +804,16 @@ export default function App() {
             minimumFractionDigits: 0,
           })
         : '—'
+    const medianLinesPerCommentByMrStr =
+      typeof byDayRes.medianLinesPerCommentByMr === 'number' &&
+      Number.isFinite(byDayRes.medianLinesPerCommentByMr)
+        ? byDayRes.medianLinesPerCommentByMr.toLocaleString('ru-RU', {
+            maximumFractionDigits: 1,
+            minimumFractionDigits: 0,
+          })
+        : '—'
+
+    const medianMrBreakdown = parseMedianMrBreakdown(byDayRes.medianLinesPerCommentMrBreakdown)
 
     const stats: Stats = {
       approved: approvedTotalStr,
@@ -730,6 +824,7 @@ export default function App() {
       avgCreatedMrsDiffLinesPerDay: avgCreatedPerDayStr,
       avgCreatedMrsDiffLinesPerMr: avgCreatedPerMrStr,
       avgLinesPerComment: avgLines,
+      medianLinesPerCommentByMr: medianLinesPerCommentByMrStr,
     }
 
     const points: ActivitySeriesPoint[] = byDayRes.days.map((day, i) => ({
@@ -753,6 +848,7 @@ export default function App() {
       stats,
       activityByDay: points,
       detailByDay: byDayRes.detailByDay ?? {},
+      medianMrBreakdown,
     }
   }
 
@@ -767,6 +863,7 @@ export default function App() {
     setCompareUserCount(0)
     setComparePeriodCount(0)
     setCompareTableSort(null)
+    setMedianMrModal(null)
 
     if (!userRows[0]?.username?.trim()) {
       setError('Укажите основного сотрудника (первая строка в списке).')
@@ -823,33 +920,33 @@ export default function App() {
       )
 
       const multiUser = activeUserRows.length > 1
-      const bundles: UserResultsBundle[] = []
 
-      for (let ui = 0; ui < activeUserRows.length; ui++) {
-        const uRow = activeUserRows[ui]
-        const resolved = resolvedList[ui]
-        const displayName = resolveUserDisplayName(resolved.username) ?? resolved.username
-        const periods = await Promise.all(
-          activeRows.map((row, i) => {
-            const baseLabel =
-              activeRows.length === 1 ? 'Период' : i === 0 ? `Период 1 · основной` : `Период ${i + 1}`
-            const label = multiUser ? `${displayName} · ${baseLabel}` : baseLabel
-            const chartKey = `${uRow.id}:${row.id}`
-            return fetchOnePeriodData(resolved.id, row, label, {
-              chartKey,
-              userRowId: uRow.id,
-              userLogin: resolved.username,
-              userDisplayName: displayName,
-            })
-          }),
-        )
-        bundles.push({
-          userRowId: uRow.id,
-          resolvedUsername: resolved.username,
-          displayName,
-          periods,
-        })
-      }
+      const bundles = await Promise.all(
+        activeUserRows.map(async (uRow, ui) => {
+          const resolved = resolvedList[ui]!
+          const displayName = resolveUserDisplayName(resolved.username) ?? resolved.username
+          const periods = await Promise.all(
+            activeRows.map((row, i) => {
+              const baseLabel =
+                activeRows.length === 1 ? 'Период' : i === 0 ? `Период 1 · основной` : `Период ${i + 1}`
+              const label = multiUser ? `${displayName} · ${baseLabel}` : baseLabel
+              const chartKey = `${uRow.id}:${row.id}`
+              return fetchOnePeriodData(resolved.id, row, label, {
+                chartKey,
+                userRowId: uRow.id,
+                userLogin: resolved.username,
+                userDisplayName: displayName,
+              })
+            }),
+          )
+          return {
+            userRowId: uRow.id,
+            resolvedUsername: resolved.username,
+            displayName,
+            periods,
+          }
+        }),
+      )
 
       setUserBundles(bundles)
       setCompareUserCount(activeUserRows.length)
@@ -949,6 +1046,20 @@ export default function App() {
   function formatPeriodRangeShort(pr: PeriodResult): string {
     const end = pr.endDateInput.trim() ? pr.endDateInput : pr.endEffectiveYmd
     return `${pr.startDate} — ${end}`
+  }
+
+  function openMedianMrBreakdownModal(pr: PeriodResult) {
+    const rows = pr.medianMrBreakdown
+    if (!rows.length) return
+    const subtitle =
+      compareUserCount > 1
+        ? `${pr.userDisplayName} (${pr.userLogin}) · ${formatPeriodRangeShort(pr)}`
+        : formatPeriodRangeShort(pr)
+    setMedianMrModal({
+      title: 'MR в расчёте медианы «стр./комм.»',
+      subtitle,
+      rows,
+    })
   }
 
   const appBarContext = useMemo(() => {
@@ -1204,9 +1315,17 @@ export default function App() {
                           )}
                           {renderCompareSortTh(
                             'linesPerComm',
-                            SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? 'compare-table-review' : 'compare-table-review compare-table-metric-group-start',
+                            'compare-table-review',
                             COMPARE_TABLE_COL_HINTS.linesPerComm,
                             'Стр./комм.',
+                          )}
+                          {renderCompareSortTh(
+                            'medianLinesPerCommMr',
+                            SHOW_CREATION_METRICS_AND_EFFECTIVENESS
+                              ? 'compare-table-review'
+                              : 'compare-table-review compare-table-metric-group-start',
+                            COMPARE_TABLE_COL_HINTS.medianLinesPerCommentMr,
+                            'Стр./комм. (мед.)',
                           )}
                           {SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? (
                             <>
@@ -1272,6 +1391,7 @@ export default function App() {
                             <td className="compare-table-review">
                               {formatCommentsPerApproval(pr.stats.approved, pr.stats.commented)}
                             </td>
+                            <td className="compare-table-review">{pr.stats.avgLinesPerComment}</td>
                             <td
                               className={
                                 SHOW_CREATION_METRICS_AND_EFFECTIVENESS
@@ -1279,7 +1399,17 @@ export default function App() {
                                   : 'compare-table-review compare-table-metric-group-start'
                               }
                             >
-                              {pr.stats.avgLinesPerComment}
+                              {pr.medianMrBreakdown.length > 0 ? (
+                                <button
+                                  type="button"
+                                  className="median-stat-trigger"
+                                  onClick={() => openMedianMrBreakdownModal(pr)}
+                                >
+                                  {pr.stats.medianLinesPerCommentByMr}
+                                </button>
+                              ) : (
+                                pr.stats.medianLinesPerCommentByMr
+                              )}
                             </td>
                             {SHOW_CREATION_METRICS_AND_EFFECTIVENESS && ev ? (
                               <>
@@ -1391,6 +1521,25 @@ export default function App() {
                       >
                         <div className="stat-label">Строк диффа на 1 комментарий</div>
                         <div className="stat-value stat-value--ratio">{flatPeriodResults[0].stats.avgLinesPerComment}</div>
+                      </article>
+                      <article
+                        className="stat-card stat-avg-lines-median"
+                        title="Медиана по чужим MR: при комментариях — дифф MR / число комментариев сотрудника в этом MR; при одобрении без комментариев — отношение 0. В расчёт входят все одобрённые чужие MR и MR с комментариями в чужих MR. Без диффа при наличии комментариев MR в медиану не входит."
+                      >
+                        <div className="stat-label">Строк диффа на 1 комментарий (медиана по MR)</div>
+                        <div className="stat-value stat-value--ratio">
+                          {flatPeriodResults[0].medianMrBreakdown.length > 0 ? (
+                            <button
+                              type="button"
+                              className="median-stat-trigger"
+                              onClick={() => openMedianMrBreakdownModal(flatPeriodResults[0])}
+                            >
+                              {flatPeriodResults[0].stats.medianLinesPerCommentByMr}
+                            </button>
+                          ) : (
+                            flatPeriodResults[0].stats.medianLinesPerCommentByMr
+                          )}
+                        </div>
                       </article>
                     </div>
                   </section>
@@ -1576,6 +1725,94 @@ export default function App() {
               </div>
             ) : null}
           </section>
+        ) : null}
+        {medianMrModal ? (
+          <div className="median-mr-modal-layer" role="presentation">
+            <button
+              type="button"
+              className="median-mr-modal-backdrop"
+              aria-label="Закрыть"
+              onClick={() => setMedianMrModal(null)}
+            />
+            <div
+              className="median-mr-modal card"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="median-mr-modal-title"
+            >
+              <div className="median-mr-modal-head">
+                <div>
+                  <h2 className="median-mr-modal-title" id="median-mr-modal-title">
+                    {medianMrModal.title}
+                  </h2>
+                  {medianMrModal.subtitle ? (
+                    <p className="median-mr-modal-subtitle">{medianMrModal.subtitle}</p>
+                  ) : null}
+                  <p className="median-mr-modal-count">
+                    Учтено MR:{' '}
+                    <strong>{medianMrModal.rows.length.toLocaleString('ru-RU')}</strong>
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="median-mr-modal-close"
+                  onClick={() => setMedianMrModal(null)}
+                >
+                  Закрыть
+                </button>
+              </div>
+              <div className="median-mr-modal-table-wrap">
+                <table className="median-mr-modal-table">
+                  <thead>
+                    <tr>
+                      <th scope="col" className="median-mr-modal-table-col-num">
+                        №
+                      </th>
+                      <th scope="col">Merge request</th>
+                      <th scope="col">Строк диффа</th>
+                      <th scope="col">Коммент. сотрудника</th>
+                      <th
+                        scope="col"
+                        title="В этом MR: строки диффа MR, делённые на число комментариев выбранного сотрудника в нём."
+                      >
+                        Стр./комм. сотрудника
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {medianMrModal.rows.map((row, rowIndex) => (
+                      <tr key={`${row.projectId}-${row.iid}`}>
+                        <td className="median-mr-modal-table-col-num">
+                          {(rowIndex + 1).toLocaleString('ru-RU')}
+                        </td>
+                        <td>
+                          {row.webUrl ? (
+                            <a href={row.webUrl} target="_blank" rel="noopener noreferrer">
+                              {row.title ?? `!${row.iid}`}
+                            </a>
+                          ) : (
+                            <span>{row.title ?? `Проект ${row.projectId}, MR !${row.iid}`}</span>
+                          )}
+                        </td>
+                        <td>{row.diffLines.toLocaleString('ru-RU')}</td>
+                        <td>{row.userCommentCount.toLocaleString('ru-RU')}</td>
+                        <td>
+                          {row.linesPerUserComment.toLocaleString('ru-RU', {
+                            maximumFractionDigits: 2,
+                            minimumFractionDigits: 0,
+                          })}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="median-mr-modal-footnote">
+                Список отсортирован по убыванию «стр./комм.» сотрудника в MR — в том же порядке, что и для медианы.
+                MR только с одобрением и без комментариев сотрудника дают стр./комм. 0.
+              </p>
+            </div>
+          </div>
         ) : null}
         <div
           className={"settings-backdrop" + (settingsOpen ? " is-open" : "")}

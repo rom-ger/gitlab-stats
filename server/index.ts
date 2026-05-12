@@ -585,6 +585,257 @@ function uniqueApprovedMergeRequestTargets(approvedList: GitlabItem[]): { pid: n
   return out
 }
 
+/** Уникальные MR из событий комментариев (project_id + iid), чтобы подтянуть дифф и для MR без одобрения. */
+function uniqueMergeRequestTargetsFromCommentedList(commentedList: GitlabItem[]): { pid: number; iid: number }[] {
+  const seen = new Set<string>()
+  const out: { pid: number; iid: number }[] = []
+  for (const row of commentedList) {
+    const meta = mergeRequestCommentMeta(asRecord(row))
+    if (!meta || meta.mrIid == null) continue
+    const k = mrTargetKey(meta.pid, meta.mrIid)
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push({ pid: meta.pid, iid: meta.mrIid })
+  }
+  return out
+}
+
+type MedianMrBreakdownBaseRow = {
+  projectId: number
+  iid: number
+  diffLines: number
+  userCommentCount: number
+  linesPerUserComment: number
+}
+
+function medianOfSortedAscending(sorted: number[]): number | null {
+  const n = sorted.length
+  if (n === 0) return null
+  const mid = Math.floor(n / 2)
+  if (n % 2 === 1) return sorted[mid]!
+  return (sorted[mid - 1]! + sorted[mid]!) / 2
+}
+
+/**
+ * Медиана «стр./комм.» по чужим MR: объединяются MR с комментариями пользователя и MR, которые он одобрил.
+ * Если в MR нет учтённых комментариев (только одобрение), отношение считается 0.
+ * Если есть комментарии: (строки диффа MR) / (число комментариев); при неизвестном или нулевом диффе такой MR в медиану не входит.
+ * Одобрения собственных MR (автор в target) не учитываются.
+ * Строки для UI — по убыванию linesPerUserComment.
+ */
+function buildMedianMrBreakdownRows(
+  commentedList: GitlabItem[],
+  approvedList: GitlabItem[],
+  selfUserId: number,
+  mrDiffLinesByKey: ReadonlyMap<string, number>,
+): { median: number | null; rows: MedianMrBreakdownBaseRow[] } {
+  type Agg = { comments: number; diffLines: number | null }
+  const byKey = new Map<string, Agg>()
+  for (const row of commentedList) {
+    const e = asRecord(row)
+    const meta = mergeRequestCommentMeta(e)
+    if (!meta || meta.mrIid == null) continue
+    const k = mrTargetKey(meta.pid, meta.mrIid)
+    let rec = byKey.get(k)
+    if (!rec) {
+      let diff: number | null = null
+      if (mrDiffLinesByKey.has(k)) diff = mrDiffLinesByKey.get(k)!
+      if (diff == null) diff = tryReadMrLineStatsFromCommentNoteable(e) ?? tryReadMrLineStatsFromEventTarget(e)
+      rec = { comments: 0, diffLines: diff }
+      byKey.set(k, rec)
+    }
+    rec.comments += 1
+    if (rec.diffLines == null) {
+      const d = tryReadMrLineStatsFromCommentNoteable(e) ?? tryReadMrLineStatsFromEventTarget(e)
+      if (d != null) rec.diffLines = d
+    }
+  }
+
+  const approvalSampleByKey = buildApprovalSampleByMrKey(approvedList)
+  for (const [k, sample] of approvalSampleByKey) {
+    const authorId = readMrAuthorIdFromEventTarget(sample)
+    if (authorId != null && authorId === selfUserId) continue
+    if (!byKey.has(k)) {
+      let diff: number | null = null
+      if (mrDiffLinesByKey.has(k)) diff = mrDiffLinesByKey.get(k)!
+      if (diff == null) diff = tryReadMrLineStatsFromEventTarget(sample)
+      byKey.set(k, { comments: 0, diffLines: diff })
+    }
+  }
+
+  const ratios: number[] = []
+  const rows: MedianMrBreakdownBaseRow[] = []
+  for (const [k, rec] of byKey) {
+    const d = rec.diffLines
+    const c = rec.comments
+    let ratio: number
+    let diffForRow: number
+    if (c > 0) {
+      if (d == null || !Number.isFinite(d) || d <= 0) continue
+      ratio = d / c
+      diffForRow = Math.trunc(d)
+    } else {
+      ratio = 0
+      diffForRow = d != null && Number.isFinite(d) && d > 0 ? Math.trunc(d) : 0
+    }
+    ratios.push(ratio)
+    const colon = k.indexOf(':')
+    if (colon <= 0) continue
+    const projectId = Number.parseInt(k.slice(0, colon), 10)
+    const iid = Number.parseInt(k.slice(colon + 1), 10)
+    if (!Number.isFinite(projectId) || !Number.isFinite(iid)) continue
+    rows.push({
+      projectId,
+      iid,
+      diffLines: diffForRow,
+      userCommentCount: c,
+      linesPerUserComment: ratio,
+    })
+  }
+  if (ratios.length === 0) return { median: null, rows: [] }
+  ratios.sort((a, b) => a - b)
+  const median = medianOfSortedAscending(ratios)
+  rows.sort((a, b) => b.linesPerUserComment - a.linesPerUserComment)
+  return { median, rows }
+}
+
+type MedianMrBreakdownHint = {
+  webUrl: string | null
+  title: string | null
+  totalUserNotesCount: number | null
+}
+
+function eventTargetTypeIsMergeRequest(raw: unknown): boolean {
+  const tt = typeof raw === 'string' ? raw.trim() : ''
+  const tl = tt.toLowerCase()
+  return tt === 'MergeRequest' || tl === 'mergerequest' || tl === 'merge_request'
+}
+
+/** Поля MR из вложенного объекта GitLab (target / noteable), без доп. HTTP. */
+function readMergeRequestDisplayHintFromObject(o: Record<string, unknown>): {
+  title: string | null
+  webUrl: string | null
+  userNotesCount: number | null
+} {
+  const title = typeof o['title'] === 'string' && o['title'].trim() ? o['title'].trim() : null
+  let webUrl: string | null = null
+  for (const key of ['web_url', 'webUrl'] as const) {
+    const w = o[key]
+    if (typeof w === 'string' && w.trim()) {
+      webUrl = w.trim()
+      break
+    }
+  }
+  const unc = o['user_notes_count']
+  const userNotesCount =
+    typeof unc === 'number' && Number.isFinite(unc) ? Math.max(0, Math.trunc(unc)) : null
+  return { title, webUrl, userNotesCount }
+}
+
+function mergeMedianMrBreakdownHint(into: MedianMrBreakdownHint, patch: MedianMrBreakdownHint): void {
+  into.webUrl = patch.webUrl ?? into.webUrl
+  if (patch.title && patch.title.trim()) into.title = patch.title.trim()
+  else if (!into.title || !into.title.trim()) into.title = patch.title
+  if (patch.totalUserNotesCount != null) into.totalUserNotesCount = patch.totalUserNotesCount
+}
+
+/**
+ * Дополняет строки разбивки медианы ссылкой/заголовком/MR без N запросов к API:
+ * данные из уже загруженных событий одобрения и комментариев + fallback URL по project path.
+ */
+function mergeMedianMrBreakdownWithEventData(
+  base: string,
+  paths: Map<number, string>,
+  rows: MedianMrBreakdownBaseRow[],
+  approvedList: GitlabItem[],
+  commentedList: GitlabItem[],
+): Array<
+  MedianMrBreakdownBaseRow & {
+    webUrl: string | null
+    title: string | null
+    totalUserNotesCount: number | null
+  }
+> {
+  const hints = new Map<string, MedianMrBreakdownHint>()
+
+  function hintFor(k: string): MedianMrBreakdownHint {
+    let h = hints.get(k)
+    if (!h) {
+      h = { webUrl: null, title: null, totalUserNotesCount: null }
+      hints.set(k, h)
+    }
+    return h
+  }
+
+  for (const row of approvedList) {
+    const e = asRecord(row)
+    if (!eventTargetTypeIsMergeRequest(e['target_type'])) continue
+    const pid = asPositiveInt(e['project_id'])
+    const iid = asPositiveInt(e['target_iid'])
+    if (pid == null || iid == null) continue
+    const k = mrTargetKey(pid, iid)
+    const tgt = e['target']
+    const fromObj =
+      tgt && typeof tgt === 'object'
+        ? readMergeRequestDisplayHintFromObject(tgt as Record<string, unknown>)
+        : { title: null, webUrl: null, userNotesCount: null as number | null }
+    const targetTitle =
+      typeof e['target_title'] === 'string' && e['target_title'].trim() ? e['target_title'].trim() : null
+    const web = eventWebUrl(base, paths, e)
+    let webUrl = web
+    if (!webUrl && fromObj.webUrl) {
+      webUrl = absoluteFromBase(base, fromObj.webUrl) ?? fromObj.webUrl
+    }
+    mergeMedianMrBreakdownHint(hintFor(k), {
+      webUrl,
+      title: fromObj.title ?? targetTitle,
+      totalUserNotesCount: fromObj.userNotesCount,
+    })
+  }
+
+  for (const row of commentedList) {
+    const e = asRecord(row)
+    const meta = mergeRequestCommentMeta(e)
+    if (!meta || meta.mrIid == null) continue
+    const k = mrTargetKey(meta.pid, meta.mrIid)
+    const note = e['note']
+    let fromObj = { title: null as string | null, webUrl: null as string | null, userNotesCount: null as number | null }
+    if (note && typeof note === 'object') {
+      const noteable = (note as Record<string, unknown>)['noteable']
+      if (noteable && typeof noteable === 'object') {
+        fromObj = readMergeRequestDisplayHintFromObject(noteable as Record<string, unknown>)
+      }
+    }
+    const web = eventWebUrl(base, paths, e)
+    let webUrl = web
+    if (!webUrl && fromObj.webUrl) {
+      webUrl = absoluteFromBase(base, fromObj.webUrl) ?? fromObj.webUrl
+    }
+    const evTitle = eventTitle(e)
+    const title =
+      (fromObj.title && fromObj.title.trim()) ||
+      (evTitle !== 'Событие' && evTitle.trim() ? evTitle.trim() : null)
+    mergeMedianMrBreakdownHint(hintFor(k), {
+      webUrl,
+      title,
+      totalUserNotesCount: fromObj.userNotesCount,
+    })
+  }
+
+  return rows.map((r) => {
+    const k = mrTargetKey(r.projectId, r.iid)
+    const h = hints.get(k)
+    const projectPath = paths.get(r.projectId)
+    const fallbackWeb = projectPath != null ? `${base}/${projectPath}/-/merge_requests/${r.iid}` : null
+    return {
+      ...r,
+      webUrl: h?.webUrl ?? fallbackWeb,
+      title: h?.title ?? null,
+      totalUserNotesCount: h?.totalUserNotesCount ?? null,
+    }
+  })
+}
+
 /** Уникальные MR из списка /merge_requests (project_id + iid). */
 function uniqueMergeRequestTargetsFromMrList(mrList: GitlabItem[]): { pid: number; iid: number }[] {
   const seen = new Set<string>()
@@ -785,7 +1036,7 @@ async function fetchMrDiffLineTotal(
 }
 
 /**
- * Считает дифф по MR для детализации и сводки: объединяет уникальные MR из одобрений и из списка созданных,
+ * Считает дифф по MR для детализации и сводки: объединяет уникальные MR из одобрений, созданных и из комментариев,
  * чтобы не дублировать запросы; сумма approvedMrsDiffLinesTotal — только по MR из одобрений (как раньше).
  */
 async function mergeRequestDiffLinesForApprovedTotalAndDetail(
@@ -794,12 +1045,14 @@ async function mergeRequestDiffLinesForApprovedTotalAndDetail(
   paths: Map<number, string>,
   approvedList: GitlabItem[],
   mrList: GitlabItem[],
+  commentedList: GitlabItem[],
 ): Promise<{ approvedMrsDiffLinesTotal: number; byKey: Map<string, number> }> {
   const approvedTargets = uniqueApprovedMergeRequestTargets(approvedList)
   const createdTargets = uniqueMergeRequestTargetsFromMrList(mrList)
+  const commentedTargets = uniqueMergeRequestTargetsFromCommentedList(commentedList)
   const seen = new Set<string>()
   const fetchTargets: { pid: number; iid: number }[] = []
-  for (const t of [...approvedTargets, ...createdTargets]) {
+  for (const t of [...approvedTargets, ...createdTargets, ...commentedTargets]) {
     const k = mrTargetKey(t.pid, t.iid)
     if (seen.has(k)) continue
     seen.add(k)
@@ -898,6 +1151,30 @@ function tryReadMrLineStatsFromEventTarget(e: Record<string, unknown>): number |
   const t = e['target']
   if (!t || typeof t !== 'object') return null
   return tryReadAdditionsDeletionsSum(t as Record<string, unknown>)
+}
+
+/** id автора MR из вложенного target события (одобрение и др.), если GitLab отдал. */
+function readMrAuthorIdFromEventTarget(e: Record<string, unknown>): number | null {
+  const t = e['target']
+  if (!t || typeof t !== 'object') return null
+  return readAuthorIdFromObject((t as Record<string, unknown>)['author'])
+}
+
+/** Первое событие одобрения по каждому MR (ключ projectId:iid) — для автора и размера диффа из target. */
+function buildApprovalSampleByMrKey(approvedList: GitlabItem[]): Map<string, Record<string, unknown>> {
+  const m = new Map<string, Record<string, unknown>>()
+  for (const row of approvedList) {
+    const e = asRecord(row)
+    const tt = typeof e['target_type'] === 'string' ? e['target_type'].trim() : ''
+    const tl = tt.toLowerCase()
+    if (tt !== 'MergeRequest' && tl !== 'mergerequest' && tl !== 'merge_request') continue
+    const pid = asPositiveInt(e['project_id'])
+    const iid = asPositiveInt(e['target_iid'])
+    if (pid == null || iid == null) continue
+    const k = mrTargetKey(pid, iid)
+    if (!m.has(k)) m.set(k, e)
+  }
+  return m
 }
 
 /** additions/deletions во вложенном note.noteable для MR. */
@@ -1485,7 +1762,7 @@ app.post('/api/activity-by-day', async (req, res) => {
 
   const paths = await fetchProjectPaths(base, token.trim(), projectIds)
   const [diffBundle, commentWebUrlByEventId] = await Promise.all([
-    mergeRequestDiffLinesForApprovedTotalAndDetail(base, token.trim(), paths, approvedList, mrList),
+    mergeRequestDiffLinesForApprovedTotalAndDetail(base, token.trim(), paths, approvedList, mrList, commentedList),
     enrichCommentedWebUrls(base, token.trim(), paths, commentedList),
   ])
   const approvedMrsDiffLinesTotal = diffBundle.approvedMrsDiffLinesTotal
@@ -1498,6 +1775,15 @@ app.post('/api/activity-by-day', async (req, res) => {
   const foreignMrCommentCount = commentedList.length
   const avgLinesPerComment =
     foreignMrCommentCount > 0 ? approvedMrsDiffLinesTotal / foreignMrCommentCount : null
+  const medianBuilt = buildMedianMrBreakdownRows(commentedList, approvedList, userId, mrDiffLinesByKey)
+  const medianLinesPerCommentByMr = medianBuilt.median
+  const medianLinesPerCommentMrBreakdown = mergeMedianMrBreakdownWithEventData(
+    base,
+    paths,
+    medianBuilt.rows,
+    approvedList,
+    commentedList,
+  )
 
   const mrsCreatedDiffLinesByDay = new Array<number>(days.length).fill(0)
   for (const row of mrList) {
@@ -1545,6 +1831,10 @@ app.post('/api/activity-by-day', async (req, res) => {
     createdMrsDiffLinesTotal,
     foreignMrCommentCount,
     avgLinesPerComment,
+    /** Медиана по чужим MR: комментарии — (дифф) / (число комментариев); только одобрение без комментариев — отношение 0; плюс все одобрённые чужие MR. */
+    medianLinesPerCommentByMr,
+    /** Разбивка для модалки: дифф, заметки в MR (user_notes_count); сортировка по убыванию стр./комм. */
+    medianLinesPerCommentMrBreakdown,
     /** События approved за интервал after/before (после дедупликации по id), для сводки без отдельного HEAD. */
     approvedEventsTotal: approvedList.length,
     /** Созданные MR (develop/dev), уникальные по id после фильтра веток — согласовано с рядами mrsCreated. */

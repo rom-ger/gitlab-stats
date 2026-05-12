@@ -808,6 +808,10 @@
   background: radial-gradient(circle at 90% 10%, #a371f7 0%, transparent 55%);
 }
 
+.stat-avg-lines-median::before {
+  background: radial-gradient(circle at 90% 10%, #c084fc 0%, transparent 55%);
+}
+
 .stat-created-diff::before {
   background: radial-gradient(circle at 90% 10%, #26a641 0%, transparent 55%);
 }
@@ -1612,4 +1616,186 @@
     border-top-color: var(--border);
     opacity: 0.85;
   }
+}
+
+/* Кликабельная медиана «стр./комм.» + модалка разбивки по MR */
+.median-stat-trigger {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  font-variant-numeric: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 30%, transparent);
+  text-underline-offset: 0.12em;
+}
+
+.median-stat-trigger:hover {
+  text-decoration-color: currentColor;
+}
+
+.median-stat-trigger:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 2px;
+  border-radius: 0.2em;
+}
+
+.median-mr-modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 320;
+}
+
+.median-mr-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.median-mr-modal {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 321;
+  width: min(52rem, 94vw);
+  max-height: min(85vh, 36rem);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  /* Непрозрачная панель: базовый .card использует полупрозрачный --surface */
+  background: rgb(15, 23, 42);
+  box-shadow: var(--shadow);
+}
+
+.median-mr-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.1rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.median-mr-modal-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.median-mr-modal-subtitle {
+  margin: 0.35rem 0 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.median-mr-modal-count {
+  margin: 0.5rem 0 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.median-mr-modal-count strong {
+  color: var(--text-strong);
+  font-weight: 650;
+}
+
+.median-mr-modal-close {
+  flex-shrink: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.35rem 0.65rem;
+  border-radius: 0.45rem;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-strong);
+  cursor: pointer;
+}
+
+.median-mr-modal-close:hover {
+  border-color: var(--accent-border);
+}
+
+.median-mr-modal-table-wrap {
+  overflow: auto;
+  padding: 0.65rem 1rem 0.5rem;
+  flex: 1;
+  min-height: 0;
+}
+
+.median-mr-modal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+
+.median-mr-modal-table th,
+.median-mr-modal-table td {
+  padding: 0.45rem 0.55rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.median-mr-modal-table th {
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.median-mr-modal-table td {
+  font-variant-numeric: tabular-nums;
+}
+
+.median-mr-modal-table th.median-mr-modal-table-col-num,
+.median-mr-modal-table td.median-mr-modal-table-col-num {
+  width: 2.75rem;
+  max-width: 3.25rem;
+  text-align: right;
+  color: var(--text-muted);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.median-mr-modal-table td:nth-child(2) {
+  font-variant-numeric: normal;
+  min-width: 10rem;
+}
+
+.median-mr-modal-table a {
+  font-weight: 600;
+  color: var(--accent-soft);
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+
+.median-mr-modal-footnote {
+  margin: 0;
+  padding: 0.55rem 1rem 0.85rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
 }
