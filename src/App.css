@@ -591,6 +591,13 @@
   color: #fecaca;
 }
 
+.notice-warning {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fde68a;
+  margin-bottom: 0.75rem;
+}
+
 .resolved {
   margin: 0 0 1rem;
   color: var(--text-muted);
@@ -1219,11 +1226,56 @@
   color: var(--text-strong);
 }
 
+.compare-days-line {
+  margin: 0 0 0.65rem;
+}
+
+.compare-days-caption {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.compare-days-caption strong {
+  color: var(--text-strong);
+  font-weight: 650;
+}
+
+.compare-days-caption-hint {
+  font-size: 0.82rem;
+  opacity: 0.88;
+}
+
+.compare-days-caption--multi .compare-days-caption-lead {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+.compare-days-list {
+  margin: 0;
+  padding-left: 1.15rem;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.compare-days-range {
+  color: var(--text-strong);
+}
+
+.compare-days-sep {
+  opacity: 0.7;
+}
+
 .compare-table-scroll {
   overflow-x: auto;
   border-radius: 0.65rem;
   border: 1px solid var(--border);
-  background: var(--surface-2);
+  /* Непрозрачный фон: иначе при sticky и скролле просвечивает страница */
+  background: #1a2332;
 }
 
 .compare-table {
@@ -1240,14 +1292,18 @@
   white-space: nowrap;
 }
 
-.compare-table th {
+.compare-table thead th {
   font-weight: 650;
   color: var(--text-muted);
-  background: var(--surface);
+  background: #151c2d;
 }
 
 .compare-table thead th[title] {
   cursor: help;
+}
+
+.compare-table tbody td {
+  background: #1a2332;
 }
 
 .compare-table tbody tr:last-child td {
@@ -1255,7 +1311,71 @@
 }
 
 .compare-table tbody tr:hover td {
-  background: rgba(255, 255, 255, 0.03);
+  background: #232e44;
+}
+
+.compare-table-login {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.compare-table th.compare-table-days-cell,
+.compare-table td.compare-table-days-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.compare-table-review,
+.compare-table th.compare-table-review,
+.compare-table td.compare-table-review {
+  background: #1e2d45;
+}
+
+.compare-table th.compare-table-review {
+  font-weight: 650;
+}
+
+.compare-table tbody tr:hover td.compare-table-review {
+  background: #263652;
+}
+
+.compare-table th.compare-table-metric-group-start,
+.compare-table td.compare-table-metric-group-start {
+  border-left: 1px solid var(--border);
+}
+
+.compare-table th.compare-table-col-sticky,
+.compare-table td.compare-table-col-sticky {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  border-right: 1px solid var(--border);
+  box-shadow: 4px 0 10px -4px rgba(0, 0, 0, 0.4);
+}
+
+.compare-table thead th.compare-table-col-sticky {
+  z-index: 4;
+  background: #151c2d;
+}
+
+.compare-table tbody td.compare-table-col-sticky {
+  background: #1a2332;
+}
+
+.compare-table tbody tr:hover td.compare-table-col-sticky {
+  background: #232e44;
+}
+
+.compare-table thead th.compare-table-col-sticky.compare-table-review {
+  background: #1e2d45;
+}
+
+.compare-table tbody td.compare-table-col-sticky.compare-table-review {
+  background: #1e2d45;
+}
+
+.compare-table tbody tr:hover td.compare-table-col-sticky.compare-table-review {
+  background: #263652;
 }
 
 .chart-period-block {

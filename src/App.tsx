@@ -10,9 +10,11 @@ import {
   TEAM_USERS,
 } from './teamPresets'
 import {
+  createEmptyCompareUserRow,
   createEmptyPeriodRow,
   getInitialFormBootstrap,
   savePersistedForm,
+  type PersistedCompareUser,
   type PersistedPeriod,
 } from './formPersistence'
 import {
@@ -26,9 +28,15 @@ import './App.css'
 
 const initialForm = getInitialFormBootstrap()
 
+/**
+ * Однократная автозагрузка при открытии приложения (валидная форма из localStorage / env).
+ * Не срабатывает при последующем вводе полей; Strict Mode не дублирует запрос.
+ */
+let appInitialAutoLoadHandled = false
+
 /** Подсказки к заголовкам таблицы сравнения периодов (нативный title / курсор help). */
 const COMPARE_TABLE_COL_HINTS = {
-  index: 'Порядковый номер периода в сравнении.',
+  user: 'Логин GitLab и отображаемое имя (если известно из списка или пресета).',
   range:
     'Календарные границы: дата начала и дата конца (если конец не задан, используется сегодняшняя дата).',
   days: 'Число календарных дней в ряду графика активности (часовой пояс браузера).',
@@ -63,6 +71,11 @@ type Stats = {
 }
 
 type PeriodResult = {
+  /** Уникальный ключ графика и детализации: userRowId + periodRowId. */
+  chartKey: string
+  userRowId: string
+  userLogin: string
+  userDisplayName: string
   id: string
   label: string
   startDate: string
@@ -71,6 +84,13 @@ type PeriodResult = {
   stats: Stats
   activityByDay: ActivitySeriesPoint[]
   detailByDay: Record<string, DayDetailItem[]>
+}
+
+type UserResultsBundle = {
+  userRowId: string
+  resolvedUsername: string
+  displayName: string
+  periods: PeriodResult[]
 }
 
 type DayDetailItem = {
@@ -189,6 +209,14 @@ function ruPeriodCountLabel(n: number): string {
   return `${n} периодов`
 }
 
+function ruCompareUserCountLabel(n: number): string {
+  const mod10 = n % 10
+  const mod100 = n % 100
+  if (mod10 === 1 && mod100 !== 11) return `${n} сотрудник`
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${n} сотрудника`
+  return `${n} сотрудников`
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const r = await fetch(path, {
     method: 'POST',
@@ -205,8 +233,8 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 export default function App() {
   const [gitlabUrl, setGitlabUrl] = useState(initialForm.gitlabUrl)
   const [token, setToken] = useState(initialForm.token)
-  const [username, setUsername] = useState(initialForm.username)
-  const [userEntryMode, setUserEntryMode] = useState<'list' | 'manual'>(initialForm.userEntryMode)
+  const [userRows, setUserRows] = useState<PersistedCompareUser[]>(initialForm.users)
+  const [pickerAnchorUserRowId, setPickerAnchorUserRowId] = useState<string | null>(null)
   const [fetchedUserList, setFetchedUserList] = useState<{ username: string; name: string }[] | null>(null)
   const [usersListLoading, setUsersListLoading] = useState(false)
   const [usersListHint, setUsersListHint] = useState<string | null>(null)
@@ -214,47 +242,68 @@ export default function App() {
   const [userPickerOpen, setUserPickerOpen] = useState(false)
   const [userSearchQuery, setUserSearchQuery] = useState('')
   const [userListHighlight, setUserListHighlight] = useState(0)
-  const userPickerRef = useRef<HTMLDivElement>(null)
   const userPickerSearchRef = useRef<HTMLInputElement>(null)
   const [periodRows, setPeriodRows] = useState<PersistedPeriod[]>(initialForm.periods)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [resolvedName, setResolvedName] = useState<string | null>(null)
-  const [periodResults, setPeriodResults] = useState<PeriodResult[] | null>(null)
+  const [compareUserCount, setCompareUserCount] = useState(0)
+  const [comparePeriodCount, setComparePeriodCount] = useState(0)
+  const [userBundles, setUserBundles] = useState<UserResultsBundle[] | null>(null)
   const [detailDay, setDetailDay] = useState<string | null>(null)
-  const [detailPeriodId, setDetailPeriodId] = useState<string | null>(null)
+  const [detailChartKey, setDetailChartKey] = useState<string | null>(null)
   const [detailItems, setDetailItems] = useState<DayDetailItem[]>([])
-  const [chartVisibilityByPeriod, setChartVisibilityByPeriod] = useState<
+  const [chartVisibilityByChartKey, setChartVisibilityByChartKey] = useState<
     Record<string, Record<ActivitySeriesKey, boolean>>
   >({})
   const [settingsOpen, setSettingsOpen] = useState(false)
 
   const primaryStartDate = periodRows[0]?.startDate?.trim() ?? ''
 
+  const flatPeriodResults = useMemo((): PeriodResult[] => {
+    if (!userBundles?.length) return []
+    return userBundles.flatMap((b) => b.periods)
+  }, [userBundles])
+
+  const filledCompareUserCount = useMemo(
+    () => userRows.filter((u) => u.username.trim()).length,
+    [userRows],
+  )
+  const filledActivePeriodCount = useMemo(
+    () => periodRows.filter((r) => r.startDate.trim()).length,
+    [periodRows],
+  )
+  const compareModeConflict = filledCompareUserCount > 1 && filledActivePeriodCount > 1
+
   const canSubmit = useMemo(() => {
-    if (!gitlabUrl.trim() || !token.trim() || !username.trim()) return false
+    if (!gitlabUrl.trim() || !token.trim()) return false
+    if (!userRows[0]?.username?.trim()) return false
     if (!primaryStartDate) return false
+    if (compareModeConflict) return false
     return periodRows.every((row) => {
       if (!row.startDate.trim()) return true
       const range = rangeFromInputs(row.startDate, row.endDate)
       if (!range) return false
       return Date.parse(range.after) <= Date.parse(range.before)
     })
-  }, [gitlabUrl, token, username, primaryStartDate, periodRows])
+  }, [gitlabUrl, token, userRows, primaryStartDate, periodRows, compareModeConflict])
 
   useEffect(() => {
     const id = window.setTimeout(() => {
       savePersistedForm({
-        v: 2,
+        v: 3,
         gitlabUrl,
         token,
-        username,
-        userEntryMode,
+        users: userRows.map((r) => ({
+          id: r.id,
+          username: r.username,
+          userEntryMode: r.userEntryMode,
+        })),
         periods: periodRows.map((r) => ({ id: r.id, startDate: r.startDate, endDate: r.endDate })),
       })
     }, 400)
     return () => window.clearTimeout(id)
-  }, [gitlabUrl, token, username, userEntryMode, periodRows])
+  }, [gitlabUrl, token, userRows, periodRows])
 
   useEffect(() => {
     if (!settingsOpen) return
@@ -305,37 +354,51 @@ export default function App() {
   useEffect(() => {
     if (!userPickerOpen) return
     function handlePointerDown(ev: MouseEvent) {
-      const root = userPickerRef.current
-      if (!root || !(ev.target instanceof Node) || root.contains(ev.target)) return
+      const t = ev.target
+      if (!(t instanceof Element)) return
+      if (t.closest('.user-picker')) return
       setUserPickerOpen(false)
     }
     document.addEventListener('mousedown', handlePointerDown)
     return () => document.removeEventListener('mousedown', handlePointerDown)
   }, [userPickerOpen])
 
+  function updateUserRow(id: string, patch: Partial<PersistedCompareUser>) {
+    setUserRows((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)))
+  }
+
+  function pickerTargetRowId(): string | null {
+    return pickerAnchorUserRowId ?? userRows[0]?.id ?? null
+  }
+
   function selectUserFromList(u: { username: string; name: string }) {
-    setUserEntryMode('list')
-    setUsername(u.username)
+    const tid = pickerTargetRowId()
+    if (!tid) return
+    updateUserRow(tid, { username: u.username, userEntryMode: 'list' })
     setUserPickerOpen(false)
     setUserSearchQuery('')
     setUserListHighlight(0)
-    setSettingsOpen(false)
+    setPickerAnchorUserRowId(null)
   }
 
   function pickOtherUser() {
-    setUserEntryMode('manual')
-    setUsername('')
+    const tid = pickerTargetRowId()
+    if (!tid) return
+    updateUserRow(tid, { userEntryMode: 'manual', username: '' })
     setUserPickerOpen(false)
     setUserSearchQuery('')
     setUserListHighlight(0)
+    setPickerAnchorUserRowId(null)
   }
 
   function backToUserList() {
-    setUserEntryMode('list')
-    setUsername('')
+    const tid = pickerTargetRowId()
+    if (!tid) return
+    updateUserRow(tid, { userEntryMode: 'list', username: '' })
     setUserPickerOpen(false)
     setUserSearchQuery('')
     setUserListHighlight(0)
+    setPickerAnchorUserRowId(null)
   }
 
   function confirmUserPickerSelection() {
@@ -392,6 +455,7 @@ export default function App() {
 
   function addComparePeriod() {
     setPeriodRows((rows) => [...rows, createEmptyPeriodRow()])
+    setUserRows((rows) => (rows.length <= 1 ? rows : [rows[0]]))
   }
 
   function removePeriodRow(id: string) {
@@ -402,6 +466,12 @@ export default function App() {
     userId: number,
     row: PersistedPeriod,
     label: string,
+    identity: {
+      chartKey: string
+      userRowId: string
+      userLogin: string
+      userDisplayName: string
+    },
   ): Promise<PeriodResult> {
     const range = rangeFromInputs(row.startDate, row.endDate)
     if (!range) {
@@ -508,6 +578,10 @@ export default function App() {
     }))
 
     return {
+      chartKey: identity.chartKey,
+      userRowId: identity.userRowId,
+      userLogin: identity.userLogin,
+      userDisplayName: identity.userDisplayName,
       id: row.id,
       label,
       startDate: row.startDate,
@@ -521,12 +595,19 @@ export default function App() {
 
   async function loadStats() {
     setError(null)
-    setPeriodResults(null)
+    setUserBundles(null)
     setDetailDay(null)
-    setDetailPeriodId(null)
+    setDetailChartKey(null)
     setDetailItems([])
-    setChartVisibilityByPeriod({})
+    setChartVisibilityByChartKey({})
     setResolvedName(null)
+    setCompareUserCount(0)
+    setComparePeriodCount(0)
+
+    if (!userRows[0]?.username?.trim()) {
+      setError('Укажите основного сотрудника (первая строка в списке).')
+      return
+    }
 
     if (!periodRows[0]?.startDate.trim()) {
       setError('Укажите дату начала основного периода.')
@@ -552,23 +633,64 @@ export default function App() {
       }
     }
 
+    const activeUserRows = userRows.filter((u) => u.username.trim())
+    if (activeUserRows.length === 0) {
+      setError('Нет сотрудников с указанным логином.')
+      return
+    }
+
+    if (activeUserRows.length > 1 && activeRows.length > 1) {
+      setError(
+        'Сравнивайте либо несколько сотрудников на одном периоде, либо несколько периодов для одного сотрудника — не одновременно.',
+      )
+      return
+    }
+
     setLoading(true)
     try {
-      const user = await postJson<{ id: number; username: string }>('/api/resolve-user', {
-        gitlabUrl,
-        token,
-        username,
-      })
-      setResolvedName(user.username)
-
-      const results = await Promise.all(
-        activeRows.map((row, i) => {
-          const label =
-            activeRows.length === 1 ? 'Период' : i === 0 ? `Период 1 · основной` : `Период ${i + 1}`
-          return fetchOnePeriodData(user.id, row, label)
-        }),
+      const resolvedList = await Promise.all(
+        activeUserRows.map((u) =>
+          postJson<{ id: number; username: string }>('/api/resolve-user', {
+            gitlabUrl,
+            token,
+            username: u.username.trim(),
+          }),
+        ),
       )
-      setPeriodResults(results)
+
+      const multiUser = activeUserRows.length > 1
+      const bundles: UserResultsBundle[] = []
+
+      for (let ui = 0; ui < activeUserRows.length; ui++) {
+        const uRow = activeUserRows[ui]
+        const resolved = resolvedList[ui]
+        const displayName = resolveUserDisplayName(resolved.username) ?? resolved.username
+        const periods = await Promise.all(
+          activeRows.map((row, i) => {
+            const baseLabel =
+              activeRows.length === 1 ? 'Период' : i === 0 ? `Период 1 · основной` : `Период ${i + 1}`
+            const label = multiUser ? `${displayName} · ${baseLabel}` : baseLabel
+            const chartKey = `${uRow.id}:${row.id}`
+            return fetchOnePeriodData(resolved.id, row, label, {
+              chartKey,
+              userRowId: uRow.id,
+              userLogin: resolved.username,
+              userDisplayName: displayName,
+            })
+          }),
+        )
+        bundles.push({
+          userRowId: uRow.id,
+          resolvedUsername: resolved.username,
+          displayName,
+          periods,
+        })
+      }
+
+      setUserBundles(bundles)
+      setCompareUserCount(activeUserRows.length)
+      setComparePeriodCount(activeRows.length)
+      setResolvedName(activeUserRows.length === 1 ? resolvedList[0].username : null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Неизвестная ошибка.')
     } finally {
@@ -577,15 +699,13 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (appInitialAutoLoadHandled) return
     if (!canSubmit) return
-    const id = window.setTimeout(() => {
-      void loadStats()
-    }, 0)
-    return () => window.clearTimeout(id)
-    // Автозагрузка при старте (полная форма из localStorage) и при смене пользователя/режима.
-    // URL, токен и даты без смены этих полей не триггерят запрос — нужна кнопка «Показать статистику».
+    appInitialAutoLoadHandled = true
+    void loadStats()
+    // Только при первом монтировании с уже валидной формой; смена полей дальше — через кнопку «Показать статистику».
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [username, userEntryMode, canSubmit])
+  }, [canSubmit])
 
   async function handleLoadUserList() {
     setUsersListError(null)
@@ -615,8 +735,15 @@ export default function App() {
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
-    if (userEntryMode === 'list' && !username.trim()) {
+    const r0 = userRows[0]
+    if (r0.userEntryMode === 'list' && !r0.username.trim()) {
       setError('Выберите сотрудника из списка.')
+      return
+    }
+    if (compareModeConflict) {
+      setError(
+        'Нельзя одновременно сравнивать несколько сотрудников и несколько периодов. Уберите лишние строки или нажмите «+», чтобы режим переключился автоматически.',
+      )
       return
     }
     setSettingsOpen(false)
@@ -625,15 +752,29 @@ export default function App() {
 
   function closeDayDetail() {
     setDetailDay(null)
-    setDetailPeriodId(null)
+    setDetailChartKey(null)
     setDetailItems([])
   }
 
-  function openDayDetail(day: string, periodId: string) {
-    const pr = periodResults?.find((p) => p.id === periodId)
+  function openDayDetail(day: string, chartKey: string) {
+    const pr = flatPeriodResults.find((p) => p.chartKey === chartKey)
     setDetailDay(day)
-    setDetailPeriodId(periodId)
+    setDetailChartKey(chartKey)
     setDetailItems(pr?.detailByDay[day] ?? [])
+  }
+
+  function userRowTitle(index: number): string {
+    if (index === 0) return 'Основной сотрудник'
+    return `Сотрудник для сравнения ${index}`
+  }
+
+  function addCompareUserRow() {
+    setUserRows((rows) => [...rows, createEmptyCompareUserRow()])
+    setPeriodRows((rows) => (rows.length <= 1 ? rows : [rows[0]]))
+  }
+
+  function removeCompareUserRow(id: string) {
+    setUserRows((rows) => (rows.length <= 1 ? rows : rows.filter((r) => r.id !== id)))
   }
 
   function periodRowTitle(index: number): string {
@@ -647,12 +788,19 @@ export default function App() {
   }
 
   const appBarContext = useMemo(() => {
+    const flat = flatPeriodResults
+    if (compareUserCount > 1) {
+      return {
+        name: ruCompareUserCountLabel(compareUserCount),
+        periodBit: flat[0] ? formatPeriodRangeShort(flat[0]) : '',
+      }
+    }
     if (!resolvedName) return null
     let periodBit = ''
-    if (periodResults && periodResults.length === 1) {
-      periodBit = formatPeriodRangeShort(periodResults[0])
-    } else if (periodResults && periodResults.length > 1) {
-      periodBit = ruPeriodCountLabel(periodResults.length)
+    if (flat.length === 1) {
+      periodBit = formatPeriodRangeShort(flat[0])
+    } else if (flat.length > 1) {
+      periodBit = ruPeriodCountLabel(comparePeriodCount > 1 ? comparePeriodCount : flat.length)
     } else if (primaryStartDate && periodRows[0]) {
       const row = periodRows[0]
       const end = row.endDate.trim() || '…'
@@ -662,21 +810,42 @@ export default function App() {
       name: resolveUserDisplayName(resolvedName) ?? resolvedName,
       periodBit,
     }
-  }, [resolvedName, periodResults, periodRows, primaryStartDate])
+  }, [
+    resolvedName,
+    compareUserCount,
+    comparePeriodCount,
+    flatPeriodResults,
+    periodRows,
+    primaryStartDate,
+  ])
 
   const detailContextPeriod =
-    detailPeriodId && periodResults ? periodResults.find((p) => p.id === detailPeriodId) : undefined
+    detailChartKey && flatPeriodResults.length > 0
+      ? flatPeriodResults.find((p) => p.chartKey === detailChartKey)
+      : undefined
 
   const detailItemsFiltered = useMemo(() => {
-    if (!detailPeriodId) return detailItems
+    if (!detailChartKey) return detailItems
     const vis =
-      chartVisibilityByPeriod[detailPeriodId] ?? ACTIVITY_SERIES_DEFAULT_VISIBILITY
+      chartVisibilityByChartKey[detailChartKey] ?? ACTIVITY_SERIES_DEFAULT_VISIBILITY
     return detailItems.filter((item) => {
       if (item.kind === 'approved') return vis.approved
       if (item.kind === 'commented') return vis.commented
       return vis.mrsCreated
     })
-  }, [detailItems, detailPeriodId, chartVisibilityByPeriod])
+  }, [detailItems, detailChartKey, chartVisibilityByChartKey])
+
+  const showCompareUserColumn = compareUserCount > 1 && comparePeriodCount === 1
+  const showComparePeriodColumn = comparePeriodCount > 1 && compareUserCount === 1
+
+  const compareTableDaysCaption = useMemo(() => {
+    if (flatPeriodResults.length <= 1) return null
+    const rows = flatPeriodResults
+    const lengths = rows.map((p) => p.activityByDay.length)
+    const n0 = lengths[0] ?? 0
+    const uniform = lengths.length > 0 && lengths.every((n) => n === n0)
+    return { uniform, n0, rows }
+  }, [flatPeriodResults])
 
   return (
     <div className="shell">
@@ -725,35 +894,123 @@ export default function App() {
             </div>
           ) : null}
 
-          {periodResults && periodResults.length > 0 ? (
+          {compareModeConflict ? (
+            <div className="notice notice-warning" role="status">
+              Нельзя одновременно указывать несколько сотрудников и несколько периодов. Оставьте один период для
+              сравнения людей или одного сотрудника для сравнения периодов — лишнее удалится при добавлении строки
+              через «+».
+            </div>
+          ) : null}
+
+          {flatPeriodResults.length > 0 ? (
             <>
-              {periodResults.length > 1 ? (
+              {flatPeriodResults.length > 1 ? (
                 <div className="compare-wrap">
-                  <h2 className="compare-heading">Сравнение периодов</h2>
+                  <h2 className="compare-heading">
+                    {compareUserCount > 1 ? 'Сравнение сотрудников' : 'Сравнение периодов'}
+                  </h2>
+                  {compareTableDaysCaption && !showComparePeriodColumn ? (
+                    <div className="compare-days-line">
+                      {compareTableDaysCaption.uniform ? (
+                        <p className="compare-days-caption" title={COMPARE_TABLE_COL_HINTS.days}>
+                          Календарных дней в периоде:{' '}
+                          <strong>{compareTableDaysCaption.n0}</strong>
+                          <span className="compare-days-caption-hint">
+                            {' '}
+                            (число точек на графике «Активность по дням»)
+                          </span>
+                        </p>
+                      ) : (
+                        <div className="compare-days-caption compare-days-caption--multi">
+                          <span className="compare-days-caption-lead" title={COMPARE_TABLE_COL_HINTS.days}>
+                            Дней в ряду графика по строкам:
+                          </span>
+                          <ul className="compare-days-list">
+                            {compareTableDaysCaption.rows.map((pr) => (
+                              <li key={pr.chartKey}>
+                                <span className="compare-days-range">{formatPeriodRangeShort(pr)}</span>
+                                <span className="compare-days-sep"> — </span>
+                                <strong>{pr.activityByDay.length}</strong>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
                   <div className="compare-table-scroll">
                     <table className="compare-table">
                       <thead>
                         <tr>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.index}>
-                            №
+                          {showCompareUserColumn ? (
+                            <th scope="col" className="compare-table-col-sticky" title={COMPARE_TABLE_COL_HINTS.user}>
+                              Сотрудник
+                            </th>
+                          ) : showComparePeriodColumn ? (
+                            <th
+                              scope="col"
+                              className="compare-table-col-sticky"
+                              title={COMPARE_TABLE_COL_HINTS.range}
+                            >
+                              Диапазон
+                            </th>
+                          ) : (
+                            <th
+                              scope="col"
+                              className="compare-table-col-sticky compare-table-review"
+                              title={COMPARE_TABLE_COL_HINTS.approved}
+                            >
+                              Одобр.
+                            </th>
+                          )}
+                          {showComparePeriodColumn ? (
+                            <th scope="col" className="compare-table-days-cell" title={COMPARE_TABLE_COL_HINTS.days}>
+                              Дней
+                            </th>
+                          ) : null}
+                          {showCompareUserColumn || showComparePeriodColumn ? (
+                            <th
+                              scope="col"
+                              className="compare-table-review"
+                              title={COMPARE_TABLE_COL_HINTS.approved}
+                            >
+                              Одобр.
+                            </th>
+                          ) : null}
+                          <th
+                            scope="col"
+                            className="compare-table-review"
+                            title={COMPARE_TABLE_COL_HINTS.diffLines}
+                          >
+                            Стр. диффа (одобр.)
                           </th>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.range}>
-                            Диапазон
-                          </th>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.days}>
-                            Дней
-                          </th>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.approved}>
-                            Одобр.
-                          </th>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.commented}>
+                          <th
+                            scope="col"
+                            className="compare-table-review"
+                            title={COMPARE_TABLE_COL_HINTS.commented}
+                          >
                             Комм.
                           </th>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.mrsCreated}>
-                            MR
+                          <th
+                            scope="col"
+                            className="compare-table-review"
+                            title={COMPARE_TABLE_COL_HINTS.commPerAppr}
+                          >
+                            Комм./одобр.
                           </th>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.diffLines}>
-                            Стр. диффа (одобр.)
+                          <th
+                            scope="col"
+                            className="compare-table-review"
+                            title={COMPARE_TABLE_COL_HINTS.linesPerComm}
+                          >
+                            Стр./комм.
+                          </th>
+                          <th
+                            scope="col"
+                            className="compare-table-metric-group-start"
+                            title={COMPARE_TABLE_COL_HINTS.mrsCreated}
+                          >
+                            MR
                           </th>
                           <th scope="col" title={COMPARE_TABLE_COL_HINTS.createdDiffLines}>
                             Стр. диффа (созд.)
@@ -764,29 +1021,37 @@ export default function App() {
                           <th scope="col" title={COMPARE_TABLE_COL_HINTS.avgCreatedDiffPerMr}>
                             Ср. стр./MR (созд.)
                           </th>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.commPerAppr}>
-                            Комм./одобр.
-                          </th>
-                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.linesPerComm}>
-                            Стр./комм.
-                          </th>
                         </tr>
                       </thead>
                       <tbody>
-                        {periodResults.map((pr, i) => (
-                          <tr key={pr.id}>
-                            <td>{i + 1}</td>
-                            <td>{formatPeriodRangeShort(pr)}</td>
-                            <td>{pr.activityByDay.length}</td>
-                            <td>{pr.stats.approved}</td>
-                            <td>{pr.stats.commented}</td>
-                            <td>{pr.stats.mrsCreated}</td>
-                            <td>{pr.stats.approvedMrsDiffLines}</td>
+                        {flatPeriodResults.map((pr) => (
+                          <tr key={pr.chartKey}>
+                            {showCompareUserColumn ? (
+                              <td className="compare-table-col-sticky">
+                                {pr.userDisplayName}
+                                <span className="compare-table-login"> ({pr.userLogin})</span>
+                              </td>
+                            ) : showComparePeriodColumn ? (
+                              <td className="compare-table-col-sticky">{formatPeriodRangeShort(pr)}</td>
+                            ) : (
+                              <td className="compare-table-col-sticky compare-table-review">{pr.stats.approved}</td>
+                            )}
+                            {showComparePeriodColumn ? (
+                              <td className="compare-table-days-cell">{pr.activityByDay.length}</td>
+                            ) : null}
+                            {showCompareUserColumn || showComparePeriodColumn ? (
+                              <td className="compare-table-review">{pr.stats.approved}</td>
+                            ) : null}
+                            <td className="compare-table-review">{pr.stats.approvedMrsDiffLines}</td>
+                            <td className="compare-table-review">{pr.stats.commented}</td>
+                            <td className="compare-table-review">
+                              {formatCommentsPerApproval(pr.stats.approved, pr.stats.commented)}
+                            </td>
+                            <td className="compare-table-review">{pr.stats.avgLinesPerComment}</td>
+                            <td className="compare-table-metric-group-start">{pr.stats.mrsCreated}</td>
                             <td>{pr.stats.createdMrsDiffLines}</td>
                             <td>{pr.stats.avgCreatedMrsDiffLinesPerDay}</td>
                             <td>{pr.stats.avgCreatedMrsDiffLinesPerMr}</td>
-                            <td>{formatCommentsPerApproval(pr.stats.approved, pr.stats.commented)}</td>
-                            <td>{pr.stats.avgLinesPerComment}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -795,7 +1060,7 @@ export default function App() {
                 </div>
               ) : null}
 
-              {periodResults.length === 1 ? (
+              {userBundles?.length === 1 && flatPeriodResults.length === 1 ? (
                 <div className="stat-groups">
                   <section
                     className="stat-group stat-group--reviews"
@@ -811,14 +1076,14 @@ export default function App() {
                         title="События с действием approved в GitLab."
                       >
                         <div className="stat-label">Одобренных MR</div>
-                        <div className="stat-value">{periodResults[0].stats.approved}</div>
+                        <div className="stat-value">{flatPeriodResults[0].stats.approved}</div>
                       </article>
                       <article
                         className="stat-card stat-comments"
                         title="Только комментарии в merge request других авторов; комментарии в ваших собственных MR не учитываются."
                       >
                         <div className="stat-label">Комментариев</div>
-                        <div className="stat-value">{periodResults[0].stats.commented}</div>
+                        <div className="stat-value">{flatPeriodResults[0].stats.commented}</div>
                       </article>
                       <article
                         className="stat-card stat-ratio"
@@ -827,8 +1092,8 @@ export default function App() {
                         <div className="stat-label">Комментариев на одно одобрение</div>
                         <div className="stat-value stat-value--ratio">
                           {formatCommentsPerApproval(
-                            periodResults[0].stats.approved,
-                            periodResults[0].stats.commented,
+                            flatPeriodResults[0].stats.approved,
+                            flatPeriodResults[0].stats.commented,
                           )}
                         </div>
                       </article>
@@ -837,14 +1102,14 @@ export default function App() {
                         title="Сумма добавленных и удалённых строк по диффу для уникальных merge request из событий одобрения (approved) за период."
                       >
                         <div className="stat-label">Строк диффа в одобрённых MR</div>
-                        <div className="stat-value">{periodResults[0].stats.approvedMrsDiffLines}</div>
+                        <div className="stat-value">{flatPeriodResults[0].stats.approvedMrsDiffLines}</div>
                       </article>
                       <article
                         className="stat-card stat-avg-lines"
                         title="Отношение суммы строк диффа в одобрённых MR к числу комментариев в чужих MR за тот же период."
                       >
                         <div className="stat-label">Строк диффа на 1 комментарий</div>
-                        <div className="stat-value stat-value--ratio">{periodResults[0].stats.avgLinesPerComment}</div>
+                        <div className="stat-value stat-value--ratio">{flatPeriodResults[0].stats.avgLinesPerComment}</div>
                       </article>
                     </div>
                   </section>
@@ -863,14 +1128,14 @@ export default function App() {
                         title="Число MR с вами автором и целевой веткой develop или dev (GitLab target_branch), созданных за период."
                       >
                         <div className="stat-label">Созданных MR</div>
-                        <div className="stat-value">{periodResults[0].stats.mrsCreated}</div>
+                        <div className="stat-value">{flatPeriodResults[0].stats.mrsCreated}</div>
                       </article>
                       <article
                         className="stat-card stat-created-diff"
                         title="Сумма диффа по уникальным MR автора с target_branch develop или dev за период; те же величины, что в детализации по дню."
                       >
                         <div className="stat-label">Строк диффа в созданных MR</div>
-                        <div className="stat-value">{periodResults[0].stats.createdMrsDiffLines}</div>
+                        <div className="stat-value">{flatPeriodResults[0].stats.createdMrsDiffLines}</div>
                       </article>
                       <article
                         className="stat-card stat-created-per-day"
@@ -878,7 +1143,7 @@ export default function App() {
                       >
                         <div className="stat-label">Средняя сумма строк диффа в день</div>
                         <div className="stat-value stat-value--ratio">
-                          {periodResults[0].stats.avgCreatedMrsDiffLinesPerDay}
+                          {flatPeriodResults[0].stats.avgCreatedMrsDiffLinesPerDay}
                         </div>
                       </article>
                       <article
@@ -887,7 +1152,7 @@ export default function App() {
                       >
                         <div className="stat-label">Средняя сумма строк диффа на 1 MR</div>
                         <div className="stat-value stat-value--ratio">
-                          {periodResults[0].stats.avgCreatedMrsDiffLinesPerMr}
+                          {flatPeriodResults[0].stats.avgCreatedMrsDiffLinesPerMr}
                         </div>
                       </article>
                     </div>
@@ -899,9 +1164,9 @@ export default function App() {
             !error && (
               <div className="placeholder">
                 <p>
-                  Откройте «Параметры» вверху справа и заполните подключение к GitLab, сотрудника и периоды. Значения
-                  сохраняются в этом браузере (localStorage). Если уже всё указано и выбран сотрудник из списка,
-                  статистика подгрузится сама; иначе нажмите «Показать статистику» в панели.
+                  Откройте «Параметры» вверху справа и заполните подключение к GitLab, сотрудников и периоды. Значения
+                  сохраняются в этом браузере (localStorage). Если форма уже полная при открытии страницы, данные
+                  подгрузятся сами; иначе нажмите «Показать статистику».
                 </p>
               </div>
             )
@@ -909,7 +1174,7 @@ export default function App() {
         </section>
         </div>
 
-        {periodResults && periodResults.some((p) => p.activityByDay.length > 0) ? (
+        {flatPeriodResults.some((p) => p.activityByDay.length > 0) ? (
           <section className="chart-fullwidth card chart-card" aria-labelledby="activity-chart-title">
             <h2 className="chart-title" id="activity-chart-title">
               Активность по дням
@@ -918,38 +1183,48 @@ export default function App() {
               По дням (часовой пояс браузера): одобрения и комментарии в MR — левая шкала (количество событий);
               созданные вами MR <strong>в develop или dev</strong> — <strong>правая шкала</strong> (сумма строк диффа в MR за день; число MR — во
               всплывающей подсказке).
-              {periodResults.length > 1
-                ? ' Ниже — отдельный график для каждого периода; детализация по клику относится к выбранному графику.'
+              {flatPeriodResults.length > 1
+                ? compareUserCount > 1
+                  ? ' Ниже — график для каждого сотрудника за один и тот же период; клик по дню откроет детали выбранного графика.'
+                  : ' Ниже — график для каждого периода; клик по дню откроет детали выбранного графика.'
                 : ''}
             </p>
-            {periodResults.map((pr) => (
-              <div key={pr.id} className="chart-period-block">
-                {periodResults.length > 1 ? (
+            {flatPeriodResults.map((pr) => (
+              <div key={pr.chartKey} className="chart-period-block">
+                {flatPeriodResults.length > 1 ? (
                   <h3 className="chart-period-title">
                     {pr.label}: {formatPeriodRangeShort(pr)}
                   </h3>
                 ) : null}
                 <ActivityByDayChart
                   points={pr.activityByDay}
-                  selectedDay={detailPeriodId === pr.id ? detailDay : null}
+                  selectedDay={detailChartKey === pr.chartKey ? detailDay : null}
                   onDayClick={
-                    pr.activityByDay.length > 0 ? (day) => openDayDetail(day, pr.id) : undefined
+                    pr.activityByDay.length > 0 ? (day) => openDayDetail(day, pr.chartKey) : undefined
                   }
-                  visibility={chartVisibilityByPeriod[pr.id] ?? ACTIVITY_SERIES_DEFAULT_VISIBILITY}
+                  visibility={chartVisibilityByChartKey[pr.chartKey] ?? ACTIVITY_SERIES_DEFAULT_VISIBILITY}
                   onVisibilityChange={(next) =>
-                    setChartVisibilityByPeriod((m) => ({ ...m, [pr.id]: next }))
+                    setChartVisibilityByChartKey((m) => ({ ...m, [pr.chartKey]: next }))
                   }
                 />
               </div>
             ))}
 
-            {detailDay && detailPeriodId ? (
+            {detailDay && detailChartKey ? (
               <div className="day-detail">
                 <div className="day-detail-head">
                   <h3 className="day-detail-title">
                     {formatDayRu(detailDay)}
                     {detailContextPeriod ? (
-                      <span className="day-detail-period"> · {formatPeriodRangeShort(detailContextPeriod)}</span>
+                      <span className="day-detail-period">
+                        {' · '}
+                        {compareUserCount > 1 ? (
+                          <>
+                            {detailContextPeriod.userDisplayName} ({detailContextPeriod.userLogin}) ·{' '}
+                          </>
+                        ) : null}
+                        {formatPeriodRangeShort(detailContextPeriod)}
+                      </span>
                     ) : null}
                   </h3>
                   <button type="button" className="day-detail-close" onClick={closeDayDetail}>
@@ -1027,8 +1302,8 @@ export default function App() {
                 Параметры
               </h2>
               <p className="settings-drawer-lead">
-                Подключение к GitLab, сотрудник и периоды. Данные событий — через API (заголовок{' '}
-                <code className="inline-code">X-Total</code>).
+                Подключение к GitLab, сотрудники и периоды. Для каждого указанного логина загружаются одни и те же
+                периоды (удобно сравнивать людей на одних датах).
               </p>
             </div>
             <button
@@ -1066,125 +1341,161 @@ export default function App() {
               />
               </label>
 
-              <div className="field">
-              <span>Сотрудник</span>
-              <div className="field-select-row">
-              {userEntryMode === 'list' ? (
-              <div className="user-picker" ref={userPickerRef}>
-              <button
-              type="button"
-              className="select-control user-picker-trigger"
-              aria-expanded={userPickerOpen}
-              aria-haspopup="listbox"
-              id="user-picker-trigger"
-              onClick={() => {
-              setUserPickerOpen((o) => !o)
-              if (!userPickerOpen) {
-              setUserSearchQuery('')
-              setUserListHighlight(0)
-              }
-              }}
-              >
-              <span className="user-picker-trigger-text">
-              {username
-              ? `${resolveUserDisplayName(username) ?? username} (${username})`
-              : '— Выберите сотрудника —'}
-              </span>
-              </button>
-              {userPickerOpen ? (
-              <div className="user-picker-dropdown" role="listbox" aria-labelledby="user-picker-trigger">
-              <input
-              ref={userPickerSearchRef}
-              type="search"
-              className="user-picker-search"
-              placeholder="Поиск по имени или логину…"
-              value={userSearchQuery}
-              onChange={(e) => {
-              setUserSearchQuery(e.target.value)
-              setUserListHighlight(0)
-              }}
-              onKeyDown={handleUserPickerSearchKeyDown}
-              autoComplete="off"
-              aria-label="Поиск по списку сотрудников"
-              />
-              <ul className="user-picker-options">
-              {filteredSelectUsers.length === 0 ? (
-              <li className="user-picker-empty" role="presentation">
-              Нет совпадений — ниже можно перейти к ручному вводу логина.
-              </li>
-              ) : (
-              filteredSelectUsers.map((u, i) => (
-              <li key={u.username} role="none">
-              <button
-              type="button"
-              role="option"
-              aria-selected={username === u.username}
-              className={`user-picker-option${i === safeListHighlight ? ' user-picker-option--active' : ''}`}
-              onMouseEnter={() => setUserListHighlight(i)}
-              onClick={() => selectUserFromList(u)}
-              >
-              <span className="user-picker-option-name">{u.name}</span>
-              <span className="user-picker-option-login">({u.username})</span>
-              </button>
-              </li>
-              ))
-              )}
-              <li role="none">
-              <button
-              type="button"
-              role="option"
-              className={`user-picker-option user-picker-option--other${safeListHighlight === userPickerOtherIndex ? ' user-picker-option--active' : ''}`}
-              onMouseEnter={() => setUserListHighlight(userPickerOtherIndex)}
-              onClick={pickOtherUser}
-              >
-              Другой пользователь…
-              </button>
-              </li>
-              </ul>
+              <div className="field periods-field">
+                <span>Сотрудники</span>
+                <p className="hint periods-hint">
+                  Основной сотрудник — первая строка (обязательна). Несколько сотрудников — только на одном общем
+                  периоде: при добавлении второго сотрудника лишние периоды сбрасываются к основному.
+                </p>
+                <div className="period-rows">
+                  {userRows.map((row, index) => (
+                    <div key={row.id} className="period-row card-nested">
+                      <div className="period-row-head">
+                        <span className="period-row-title">{userRowTitle(index)}</span>
+                        {index > 0 ? (
+                          <button
+                            type="button"
+                            className="btn-inline btn-danger-ghost"
+                            onClick={() => removeCompareUserRow(row.id)}
+                            aria-label={`Удалить ${userRowTitle(index)}`}
+                          >
+                            Удалить
+                          </button>
+                        ) : null}
+                      </div>
+                      <div className="field-select-row">
+                        {row.userEntryMode === 'list' ? (
+                          <div className="user-picker">
+                            <button
+                              type="button"
+                              className="select-control user-picker-trigger"
+                              aria-expanded={userPickerOpen && pickerAnchorUserRowId === row.id}
+                              aria-haspopup="listbox"
+                              id={`user-picker-trigger-${row.id}`}
+                              onClick={() => {
+                                if (userPickerOpen && pickerAnchorUserRowId === row.id) {
+                                  setUserPickerOpen(false)
+                                  setPickerAnchorUserRowId(null)
+                                } else {
+                                  setPickerAnchorUserRowId(row.id)
+                                  setUserPickerOpen(true)
+                                  setUserSearchQuery('')
+                                  setUserListHighlight(0)
+                                }
+                              }}
+                            >
+                              <span className="user-picker-trigger-text">
+                                {row.username.trim()
+                                  ? `${resolveUserDisplayName(row.username) ?? row.username} (${row.username})`
+                                  : '— Выберите сотрудника —'}
+                              </span>
+                            </button>
+                            {userPickerOpen && pickerAnchorUserRowId === row.id ? (
+                              <div
+                                className="user-picker-dropdown"
+                                role="listbox"
+                                aria-labelledby={`user-picker-trigger-${row.id}`}
+                              >
+                                <input
+                                  ref={userPickerSearchRef}
+                                  type="search"
+                                  className="user-picker-search"
+                                  placeholder="Поиск по имени или логину…"
+                                  value={userSearchQuery}
+                                  onChange={(e) => {
+                                    setUserSearchQuery(e.target.value)
+                                    setUserListHighlight(0)
+                                  }}
+                                  onKeyDown={handleUserPickerSearchKeyDown}
+                                  autoComplete="off"
+                                  aria-label="Поиск по списку сотрудников"
+                                />
+                                <ul className="user-picker-options">
+                                  {filteredSelectUsers.length === 0 ? (
+                                    <li className="user-picker-empty" role="presentation">
+                                      Нет совпадений — ниже можно перейти к ручному вводу логина.
+                                    </li>
+                                  ) : (
+                                    filteredSelectUsers.map((u, i) => (
+                                      <li key={u.username} role="none">
+                                        <button
+                                          type="button"
+                                          role="option"
+                                          aria-selected={row.username === u.username}
+                                          className={`user-picker-option${i === safeListHighlight ? ' user-picker-option--active' : ''}`}
+                                          onMouseEnter={() => setUserListHighlight(i)}
+                                          onClick={() => selectUserFromList(u)}
+                                        >
+                                          <span className="user-picker-option-name">{u.name}</span>
+                                          <span className="user-picker-option-login">({u.username})</span>
+                                        </button>
+                                      </li>
+                                    ))
+                                  )}
+                                  <li role="none">
+                                    <button
+                                      type="button"
+                                      role="option"
+                                      className={`user-picker-option user-picker-option--other${safeListHighlight === userPickerOtherIndex ? ' user-picker-option--active' : ''}`}
+                                      onMouseEnter={() => setUserListHighlight(userPickerOtherIndex)}
+                                      onClick={pickOtherUser}
+                                    >
+                                      Другой пользователь…
+                                    </button>
+                                  </li>
+                                </ul>
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <button type="button" className="select-control user-picker-trigger" onClick={backToUserList}>
+                            <span className="user-picker-trigger-text">← К списку сотрудников</span>
+                          </button>
+                        )}
+                        {index === 0 ? (
+                          <button
+                            type="button"
+                            className="btn-inline"
+                            disabled={usersListLoading || !gitlabUrl.trim() || !token.trim()}
+                            onClick={() => void handleLoadUserList()}
+                          >
+                            {usersListLoading ? 'Загрузка…' : 'Из GitLab'}
+                          </button>
+                        ) : null}
+                      </div>
+                      {row.userEntryMode === 'manual' ? (
+                        <label className="field">
+                          <span>Логин в GitLab</span>
+                          <input
+                            type="text"
+                            autoComplete="username"
+                            placeholder="username"
+                            value={row.username}
+                            onChange={(e) => updateUserRow(row.id, { username: e.target.value })}
+                            required={index === 0}
+                          />
+                        </label>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+                {usersListError ? (
+                  <p className="field-inline-msg field-inline-msg--error" role="alert">
+                    {usersListError}
+                  </p>
+                ) : null}
+                {usersListHint ? <p className="field-inline-msg hint">{usersListHint}</p> : null}
+                <button type="button" className="btn-inline add-period-btn" onClick={addCompareUserRow}>
+                  + Добавить сотрудника для сравнения
+                </button>
               </div>
-              ) : null}
-              </div>
-              ) : (
-              <button type="button" className="select-control user-picker-trigger" onClick={backToUserList}>
-              <span className="user-picker-trigger-text">← К списку сотрудников</span>
-              </button>
-              )}
-              <button
-              type="button"
-              className="btn-inline"
-              disabled={usersListLoading || !gitlabUrl.trim() || !token.trim()}
-              onClick={() => void handleLoadUserList()}
-              >
-              {usersListLoading ? 'Загрузка…' : 'Из GitLab'}
-              </button>
-              </div>
-              {usersListError ? (
-              <p className="field-inline-msg field-inline-msg--error" role="alert">
-              {usersListError}
-              </p>
-              ) : null}
-              {usersListHint ? <p className="field-inline-msg hint">{usersListHint}</p> : null}
-              </div>
-
-              {userEntryMode === 'manual' ? (
-              <label className="field">
-              <span>Логин в GitLab</span>
-              <input
-              type="text"
-              autoComplete="username"
-              placeholder="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              required
-              />
-              </label>
-              ) : null}
 
               <div className="field periods-field">
               <span>Периоды</span>
               <p className="hint periods-hint">
-              По умолчанию один период. Можно добавить ещё — данные загрузятся для каждого заполненного диапазона
-              и появятся сравнительная таблица и отдельные графики.
+                Несколько периодов — только для одного сотрудника: при добавлении второго периода дополнительные
+                строки сотрудников удаляются (остаётся основной). Сравнение нескольких людей и нескольких дат одновременно
+                недоступно.
               </p>
               <div className="period-rows">
               {periodRows.map((row, index) => (
