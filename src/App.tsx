@@ -25,6 +25,7 @@ import {
   type ActivitySeriesPoint,
 } from './ActivityByDayChart'
 import { formatDayRu } from './chartDates'
+import { effectivenessScoreFromPeriod } from './effectivenessScore'
 import './App.css'
 
 const initialForm = getInitialFormBootstrap()
@@ -58,6 +59,8 @@ const COMPARE_TABLE_COL_HINTS = {
     'Отношение числа комментариев в чужих MR к числу одобрений за тот же период (комментариев на одно одобрение).',
   linesPerComm:
     'Отношение суммы строк диффа в одобрённых MR к числу комментариев в чужих MR за период (строк на один комментарий).',
+  effectiveness:
+    'Эвристический индекс 0–100: комментарии в чужих MR (интенсивность и глубина), свой код в develop/dev; без числа одобрений и без размера чужих MR.',
 } as const
 
 type Stats = {
@@ -100,6 +103,7 @@ type CompareTableSortKey =
   | 'createdMrsDiffLines'
   | 'avgCreatedPerDay'
   | 'avgCreatedPerMr'
+  | 'effectiveness'
 
 type CompareTableSort = { key: CompareTableSortKey; dir: 'asc' | 'desc' }
 
@@ -116,6 +120,7 @@ const COMPARE_SORT_COL_LABELS: Record<CompareTableSortKey, string> = {
   createdMrsDiffLines: 'Стр. диффа (созд.)',
   avgCreatedPerDay: 'Ср. стр./день (созд.)',
   avgCreatedPerMr: 'Ср. стр./MR (созд.)',
+  effectiveness: 'Индекс',
 }
 
 function parseRuNumericStat(raw: string): number | null {
@@ -212,6 +217,8 @@ function comparePeriodResultByKey(a: PeriodResult, b: PeriodResult, key: Compare
         parseRuNumericStat(a.stats.avgCreatedMrsDiffLinesPerMr),
         parseRuNumericStat(b.stats.avgCreatedMrsDiffLinesPerMr),
       )
+    case 'effectiveness':
+      return effectivenessScoreFromPeriod(a).score - effectivenessScoreFromPeriod(b).score
     default:
       return 0
   }
@@ -990,6 +997,11 @@ export default function App() {
     return { uniform, n0, rows }
   }, [flatPeriodResults])
 
+  const singlePeriodEffectiveness = useMemo(() => {
+    if (userBundles?.length !== 1 || flatPeriodResults.length !== 1) return null
+    return effectivenessScoreFromPeriod(flatPeriodResults[0])
+  }, [userBundles, flatPeriodResults])
+
   const sortedCompareTableRows = useMemo(
     () => sortComparePeriodResults(flatPeriodResults, compareTableSort),
     [flatPeriodResults, compareTableSort],
@@ -1206,11 +1218,19 @@ export default function App() {
                             COMPARE_TABLE_COL_HINTS.avgCreatedDiffPerMr,
                             'Ср. стр./MR (созд.)',
                           )}
+                          {renderCompareSortTh(
+                            'effectiveness',
+                            'compare-table-effectiveness',
+                            COMPARE_TABLE_COL_HINTS.effectiveness,
+                            'Индекс',
+                          )}
                         </tr>
                       </thead>
                       <tbody>
-                        {sortedCompareTableRows.map((pr) => (
-                          <tr key={pr.chartKey}>
+                        {sortedCompareTableRows.map((pr) => {
+                          const ev = effectivenessScoreFromPeriod(pr)
+                          return (
+                            <tr key={pr.chartKey}>
                             {showCompareUserColumn ? (
                               <td className="compare-table-col-sticky">
                                 {pr.userDisplayName}
@@ -1237,8 +1257,15 @@ export default function App() {
                             <td>{pr.stats.createdMrsDiffLines}</td>
                             <td>{pr.stats.avgCreatedMrsDiffLinesPerDay}</td>
                             <td>{pr.stats.avgCreatedMrsDiffLinesPerMr}</td>
+                            <td
+                              className="compare-table-effectiveness"
+                              title={ev.tooltip}
+                            >
+                              {ev.score}
+                            </td>
                           </tr>
-                        ))}
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -1246,7 +1273,44 @@ export default function App() {
               ) : null}
 
               {userBundles?.length === 1 && flatPeriodResults.length === 1 ? (
-                <div className="stat-groups">
+                <>
+                  {singlePeriodEffectiveness ? (
+                    <section
+                      className="effectiveness-banner card"
+                      aria-labelledby="effectiveness-title"
+                      title={singlePeriodEffectiveness.tooltip}
+                    >
+                      <div className="effectiveness-banner-inner">
+                        <div className="effectiveness-score-block">
+                          <div className="effectiveness-score-value">
+                            {singlePeriodEffectiveness.score}
+                            <span className="effectiveness-score-max">/100</span>
+                          </div>
+                          <p className="effectiveness-score-band">{singlePeriodEffectiveness.band}</p>
+                        </div>
+                        <div className="effectiveness-banner-text">
+                          <h3 className="effectiveness-banner-title" id="effectiveness-title">
+                            Индекс активности за период
+                          </h3>
+                          <p className="effectiveness-banner-lead">
+                            Ориентир по <strong>комментариям</strong> в чужих MR и по <strong>своему коду</strong> в{' '}
+                            <strong>develop</strong>/<strong>dev</strong>. Число одобрений и размер чужих MR в
+                            индекс не входят — на них мало влияния. Наведите на блок — детали расчёта. Не KPI и не
+                            сравнение людей без контекста задач.
+                          </p>
+                        </div>
+                        <div className="effectiveness-bar-wrap" aria-hidden>
+                          <div className="effectiveness-bar-track">
+                            <div
+                              className="effectiveness-bar-fill"
+                              style={{ width: `${singlePeriodEffectiveness.score}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+                  ) : null}
+                  <div className="stat-groups">
                   <section
                     className="stat-group stat-group--reviews"
                     aria-labelledby="stat-group-reviews"
@@ -1343,6 +1407,7 @@ export default function App() {
                     </div>
                   </section>
                 </div>
+                </>
               ) : null}
             </>
           ) : (

@@ -608,6 +608,100 @@
   color: var(--text-strong);
 }
 
+.effectiveness-banner {
+  margin-bottom: 0.85rem;
+  padding: 0.9rem 1rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--accent-soft) 30%, var(--border));
+  background: linear-gradient(
+    125deg,
+    rgba(252, 163, 38, 0.1) 0%,
+    rgba(15, 23, 42, 0.55) 48%,
+    rgba(45, 164, 78, 0.08) 100%
+  );
+}
+
+.effectiveness-banner-inner {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  gap: 0.35rem 1rem;
+  align-items: start;
+}
+
+.effectiveness-score-block {
+  grid-row: 1 / span 2;
+}
+
+.effectiveness-score-value {
+  font-size: clamp(2rem, 5vw, 2.65rem);
+  font-weight: 750;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.effectiveness-score-max {
+  font-size: 0.55em;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-left: 0.1em;
+}
+
+.effectiveness-score-band {
+  margin: 0.35rem 0 0;
+  font-size: 0.81rem;
+  font-weight: 600;
+  color: var(--accent-soft);
+}
+
+.effectiveness-banner-text {
+  min-width: 0;
+}
+
+.effectiveness-banner-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: var(--text-strong);
+}
+
+.effectiveness-banner-lead {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.effectiveness-bar-wrap {
+  grid-column: 1 / -1;
+}
+
+.effectiveness-bar-track {
+  height: 0.38rem;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.22);
+  overflow: hidden;
+}
+
+.effectiveness-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #fca326, #2da44e);
+  min-width: 3px;
+  transition: width 0.35s ease;
+}
+
+@media (max-width: 520px) {
+  .effectiveness-banner-inner {
+    grid-template-columns: 1fr;
+  }
+
+  .effectiveness-score-block {
+    grid-row: auto;
+  }
+}
+
 .stat-groups {
   display: flex;
   flex-direction: column;
@@ -1380,6 +1474,17 @@
 .compare-table td.compare-table-days-cell {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.compare-table th.compare-table-effectiveness,
+.compare-table td.compare-table-effectiveness {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.compare-th-sortable.compare-table-effectiveness .compare-th-sort-btn {
+  justify-content: flex-end;
 }
 
 .compare-table-review,
