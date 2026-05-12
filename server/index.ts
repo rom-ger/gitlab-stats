@@ -39,6 +39,12 @@ async function gitlabFetch(
 }
 
 const PER_PAGE = 100
+/** Несколько MR в одном GraphQL-запросе (один project fullPath). */
+const MR_DIFF_GRAPHQL_IIDS_PER_REQUEST = 8
+/** Параллельных GraphQL-запросов к разным проектам / батчам. */
+const MR_DIFF_GRAPHQL_HTTP_CONCURRENCY = 6
+/** Параллельных REST/GraphQL fallback на один MR после батча. */
+const MR_DIFF_FALLBACK_CHUNK = 18
 const MAX_LIST_PAGES = 400
 /** Пагинация GET /users — верхняя граница страниц (100 пользователей на страницу). */
 const MAX_USER_LIST_PAGES = 200
@@ -655,8 +661,12 @@ async function fetchMrDiffLineTotalGraphql(
   }
   if (Array.isArray(obj.errors) && obj.errors.length > 0) return null
   const mr = obj.data?.project?.mergeRequest
-  if (mr == null) return null
-  const s = mr.diffStatsSummary
+  return readDiffStatsLineTotalFromMergeRequestGql(mr)
+}
+
+function readDiffStatsLineTotalFromMergeRequestGql(mr: unknown): number | null {
+  if (mr == null || typeof mr !== 'object') return null
+  const s = (mr as Record<string, unknown>)['diffStatsSummary']
   if (s == null || typeof s !== 'object') return null
   const a = (s as Record<string, unknown>)['additions']
   const d = (s as Record<string, unknown>)['deletions']
@@ -664,6 +674,64 @@ async function fetchMrDiffLineTotalGraphql(
   const add = a >= 0 ? Math.trunc(a) : 0
   const del = d >= 0 ? Math.trunc(d) : 0
   return add + del
+}
+
+/** Несколько iid одного проекта за один HTTP к /api/graphql. */
+async function fetchMrDiffLineTotalsBatchGraphql(
+  base: string,
+  token: string,
+  fullPath: string,
+  iids: number[],
+): Promise<Map<number, number>> {
+  const out = new Map<number, number>()
+  if (iids.length === 0) return out
+
+  const selectionLines = iids.map((iid, idx) => {
+    const iidStr = JSON.stringify(String(iid))
+    return `    m${idx}: mergeRequest(iid: ${iidStr}) { diffStatsSummary { additions deletions } }`
+  })
+  const query = `query GitlabStatsMrDiffBatch($fullPath: ID!) {
+  project(fullPath: $fullPath) {
+${selectionLines.join('\n')}
+  }
+}`
+
+  let r: Response
+  try {
+    r = await fetch(`${base}/api/graphql`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'PRIVATE-TOKEN': token,
+      },
+      body: JSON.stringify({
+        query,
+        variables: { fullPath },
+      }),
+    })
+  } catch {
+    return out
+  }
+  if (!r.ok) return out
+  let j: unknown
+  try {
+    j = await r.json()
+  } catch {
+    return out
+  }
+  if (!j || typeof j !== 'object') return out
+  const obj = j as { errors?: unknown; data?: { project?: Record<string, unknown> | null } | null }
+  if (Array.isArray(obj.errors) && obj.errors.length > 0) return out
+  const project = obj.data?.project
+  if (!project || typeof project !== 'object') return out
+
+  for (let idx = 0; idx < iids.length; idx++) {
+    const iid = iids[idx]
+    const mr = project[`m${idx}`]
+    const n = readDiffStatsLineTotalFromMergeRequestGql(mr)
+    if (n != null) out.set(iid, n)
+  }
+  return out
 }
 
 async function fetchMrDiffLineTotalFromChanges(
@@ -739,9 +807,50 @@ async function mergeRequestDiffLinesForApprovedTotalAndDetail(
   }
 
   const byKey = new Map<string, number>()
-  const chunkSize = 10
-  for (let i = 0; i < fetchTargets.length; i += chunkSize) {
-    const chunk = fetchTargets.slice(i, i + chunkSize)
+
+  const iidSetByPid = new Map<number, Set<number>>()
+  for (const { pid, iid } of fetchTargets) {
+    if (!paths.get(pid)) continue
+    let s = iidSetByPid.get(pid)
+    if (!s) {
+      s = new Set()
+      iidSetByPid.set(pid, s)
+    }
+    s.add(iid)
+  }
+
+  type GraphBatchTask = { pid: number; fullPath: string; iids: number[] }
+  const graphTasks: GraphBatchTask[] = []
+  for (const [pid, set] of iidSetByPid) {
+    const fullPath = paths.get(pid)
+    if (!fullPath) continue
+    const iids = [...set]
+    for (let i = 0; i < iids.length; i += MR_DIFF_GRAPHQL_IIDS_PER_REQUEST) {
+      graphTasks.push({ pid, fullPath, iids: iids.slice(i, i + MR_DIFF_GRAPHQL_IIDS_PER_REQUEST) })
+    }
+  }
+
+  for (let i = 0; i < graphTasks.length; i += MR_DIFF_GRAPHQL_HTTP_CONCURRENCY) {
+    const slice = graphTasks.slice(i, i + MR_DIFF_GRAPHQL_HTTP_CONCURRENCY)
+    const batchMaps = await Promise.all(
+      slice.map((t) => fetchMrDiffLineTotalsBatchGraphql(base, token, t.fullPath, t.iids)),
+    )
+    for (let j = 0; j < slice.length; j++) {
+      const { pid, iids } = slice[j]
+      const m = batchMaps[j]
+      for (const iid of iids) {
+        const n = m.get(iid)
+        if (n != null) byKey.set(mrTargetKey(pid, iid), n)
+      }
+    }
+  }
+
+  const fallback: { pid: number; iid: number }[] = []
+  for (const { pid, iid } of fetchTargets) {
+    if (!byKey.has(mrTargetKey(pid, iid))) fallback.push({ pid, iid })
+  }
+  for (let i = 0; i < fallback.length; i += MR_DIFF_FALLBACK_CHUNK) {
+    const chunk = fallback.slice(i, i + MR_DIFF_FALLBACK_CHUNK)
     const parts = await Promise.all(
       chunk.map(({ pid, iid }) => fetchMrDiffLineTotal(base, token, paths, pid, iid)),
     )
@@ -1202,13 +1311,18 @@ app.post('/api/merge-requests-total', async (req, res) => {
     scope: 'all',
   })
 
+  const branchResults = await Promise.all(
+    AUTHOR_MR_TARGET_BRANCHES.map(async (branch) => {
+      const p = new URLSearchParams(baseMrParams)
+      p.set('target_branch', branch)
+      const url = `${base}/api/v4/merge_requests?${p}`
+      return readGitlabListTotalNumber(url, token.trim())
+    }),
+  )
+
   let sum = 0
   let lastHttpStatus = 200
-  for (const branch of AUTHOR_MR_TARGET_BRANCHES) {
-    const p = new URLSearchParams(baseMrParams)
-    p.set('target_branch', branch)
-    const url = `${base}/api/v4/merge_requests?${p}`
-    const r = await readGitlabListTotalNumber(url, token.trim())
+  for (const r of branchResults) {
     if (!r.ok) {
       res.status(r.status).json({ error: r.message })
       return
@@ -1318,7 +1432,7 @@ app.post('/api/activity-by-day', async (req, res) => {
     }
   }
 
-  const approvedList = approvedRes.items
+  const approvedList = dedupEventsById(approvedRes.items)
   const commentedDeduped = dedupEventsById([
     ...commentedRes.items,
     ...noteRes.items.filter((row) => isCommentedActionName(asRecord(row)['action_name'])),
@@ -1431,6 +1545,10 @@ app.post('/api/activity-by-day', async (req, res) => {
     createdMrsDiffLinesTotal,
     foreignMrCommentCount,
     avgLinesPerComment,
+    /** События approved за интервал after/before (после дедупликации по id), для сводки без отдельного HEAD. */
+    approvedEventsTotal: approvedList.length,
+    /** Созданные MR (develop/dev), уникальные по id после фильтра веток — согласовано с рядами mrsCreated. */
+    mergeRequestsCreatedTotal: mrList.length,
   })
 })
 

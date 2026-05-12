@@ -414,49 +414,43 @@ export default function App() {
     }
 
     const endEffectiveYmd = row.endDate.trim() || todayLocalYmd()
-    const basePayload = {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+
+    const byDayRes = await postJson<{
+      days: string[]
+      approved: number[]
+      commented: number[]
+      mrsCreated: number[]
+      mrsCreatedDiffLinesByDay?: number[]
+      detailByDay: Record<string, DayDetailItem[]>
+      approvedMrsDiffLinesTotal: number
+      createdMrsDiffLinesTotal?: number
+      foreignMrCommentCount: number
+      avgLinesPerComment: number | null
+      approvedEventsTotal?: number
+      mergeRequestsCreatedTotal?: number
+    }>('/api/activity-by-day', {
       gitlabUrl,
       token,
       userId,
       after: range.after,
       before: range.before,
-    }
-    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+      startDate: row.startDate,
+      endDate: endEffectiveYmd,
+      timeZone,
+    })
 
-    const [approvedRes, mrsRes, byDayRes] = await Promise.all([
-      postJson<{ total: string }>('/api/events-total', {
-        ...basePayload,
-        action: 'approved',
-      }),
-      postJson<{ total: string }>('/api/merge-requests-total', {
-        gitlabUrl,
-        token,
-        userId,
-        createdAfter: range.after,
-        createdBefore: range.before,
-      }),
-      postJson<{
-        days: string[]
-        approved: number[]
-        commented: number[]
-        mrsCreated: number[]
-        mrsCreatedDiffLinesByDay?: number[]
-        detailByDay: Record<string, DayDetailItem[]>
-        approvedMrsDiffLinesTotal: number
-        createdMrsDiffLinesTotal?: number
-        foreignMrCommentCount: number
-        avgLinesPerComment: number | null
-      }>('/api/activity-by-day', {
-        gitlabUrl,
-        token,
-        userId,
-        after: range.after,
-        before: range.before,
-        startDate: row.startDate,
-        endDate: endEffectiveYmd,
-        timeZone,
-      }),
-    ])
+    const approvedTotalStr = String(
+      typeof byDayRes.approvedEventsTotal === 'number' && Number.isFinite(byDayRes.approvedEventsTotal)
+        ? byDayRes.approvedEventsTotal
+        : byDayRes.approved.reduce((s, n) => s + (n ?? 0), 0),
+    )
+    const mrsCreatedTotalStr = String(
+      typeof byDayRes.mergeRequestsCreatedTotal === 'number' &&
+        Number.isFinite(byDayRes.mergeRequestsCreatedTotal)
+        ? byDayRes.mergeRequestsCreatedTotal
+        : byDayRes.mrsCreated.reduce((s, n) => s + (n ?? 0), 0),
+    )
 
     const commentedSum = byDayRes.commented.reduce((s, n) => s + (n ?? 0), 0)
     const commentCount =
@@ -478,7 +472,7 @@ export default function App() {
             minimumFractionDigits: 0,
           })
         : '—'
-    const mrsCreatedNum = Number.parseInt(mrsRes.total, 10)
+    const mrsCreatedNum = Number.parseInt(mrsCreatedTotalStr, 10)
     const avgCreatedPerMrStr =
       Number.isFinite(mrsCreatedNum) && mrsCreatedNum > 0
         ? (createdDiffTotal / mrsCreatedNum).toLocaleString('ru-RU', {
@@ -495,9 +489,9 @@ export default function App() {
         : '—'
 
     const stats: Stats = {
-      approved: approvedRes.total,
+      approved: approvedTotalStr,
       commented: String(commentCount),
-      mrsCreated: mrsRes.total,
+      mrsCreated: mrsCreatedTotalStr,
       approvedMrsDiffLines: diffLinesTotal.toLocaleString('ru-RU'),
       createdMrsDiffLines: createdDiffTotal.toLocaleString('ru-RU'),
       avgCreatedMrsDiffLinesPerDay: avgCreatedPerDayStr,
