@@ -29,6 +29,8 @@ type SeriesKey = ActivitySeriesKey
 
 const SERIES_ORDER: SeriesKey[] = ['mrsCreated', 'approved', 'commented']
 
+const SERIES_ORDER_NO_MR: SeriesKey[] = ['approved', 'commented']
+
 const SERIES_LABEL: Record<SeriesKey, string> = {
   mrsCreated: 'Созд. MR — строки диффа',
   approved: 'Одобрение MR',
@@ -113,6 +115,8 @@ export function ActivityByDayChart({
   onDayClick,
   visibility: visibilityControlled,
   onVisibilityChange,
+  /** Ложь — не рисуем серию «созд. MR», правую ось Y и пункт легенды (только одобрения и комментарии). */
+  showMrsCreatedSeries = true,
 }: {
   points: ActivitySeriesPoint[]
   selectedDay?: string | null
@@ -120,6 +124,7 @@ export function ActivityByDayChart({
   /** Если задано вместе с onVisibilityChange — контролируемая легенда (фильтр серий). */
   visibility?: Record<SeriesKey, boolean>
   onVisibilityChange?: (next: Record<SeriesKey, boolean>) => void
+  showMrsCreatedSeries?: boolean
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [scrollViewportWidth, setScrollViewportWidth] = useState(0)
@@ -133,7 +138,12 @@ export function ActivityByDayChart({
     ACTIVITY_SERIES_DEFAULT_VISIBILITY,
   )
   const isControlled = visibilityControlled != null && onVisibilityChange != null
-  const visibility = isControlled ? visibilityControlled : visibilityInternal
+  const visibilityRaw = isControlled ? visibilityControlled : visibilityInternal
+  const visibility: Record<SeriesKey, boolean> = showMrsCreatedSeries
+    ? visibilityRaw
+    : { ...visibilityRaw, mrsCreated: false }
+
+  const seriesOrder = showMrsCreatedSeries ? SERIES_ORDER : SERIES_ORDER_NO_MR
 
   const visibilityLayoutKey = `${visibility.approved ? 1 : 0}${visibility.commented ? 1 : 0}${visibility.mrsCreated ? 1 : 0}`
 
@@ -192,7 +202,7 @@ export function ActivityByDayChart({
   const ticksRight = showRight ? axisTicks(yTopRight) : []
   const gridTicks = showLeft ? ticksLeft : ticksRight
 
-  const activeKeys = SERIES_ORDER.filter((k) => visibility[k])
+  const activeKeys = seriesOrder.filter((k) => visibility[k])
   const visibleCount = activeKeys.length
 
   const n = points.length
@@ -208,10 +218,13 @@ export function ActivityByDayChart({
   const labelEvery = n <= approxXLabelSlots ? 1 : Math.max(1, Math.ceil(n / approxXLabelSlots))
 
   function toggleSeries(key: SeriesKey) {
+    if (!showMrsCreatedSeries && key === 'mrsCreated') return
     const apply = (prev: Record<SeriesKey, boolean>) => {
-      const on = SERIES_ORDER.filter((k) => prev[k]).length
+      const on = seriesOrder.filter((k) => prev[k]).length
       if (prev[key] && on <= 1) return prev
-      return { ...prev, [key]: !prev[key] }
+      const next = { ...prev, [key]: !prev[key] }
+      if (!showMrsCreatedSeries) next.mrsCreated = false
+      return next
     }
     if (isControlled) {
       onVisibilityChange!(apply(visibilityControlled))
@@ -220,7 +233,7 @@ export function ActivityByDayChart({
     }
   }
 
-  const tooltipRows = SERIES_ORDER.filter((k) => visibility[k])
+  const tooltipRows = seriesOrder.filter((k) => visibility[k])
 
   return (
     <div className="activity-chart">
@@ -416,7 +429,7 @@ export function ActivityByDayChart({
       ) : null}
 
       <ul className="activity-chart-legend" aria-label="Серии на графике — нажмите, чтобы скрыть или показать">
-        {SERIES_ORDER.map((key) => (
+        {seriesOrder.map((key) => (
           <li key={key}>
             <button
               type="button"

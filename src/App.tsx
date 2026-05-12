@@ -36,6 +36,20 @@ const initialForm = getInitialFormBootstrap()
  */
 let appInitialAutoLoadHandled = false
 
+/**
+ * Временно скрыто от пользователей: раздел «Собственный код», индекс активности,
+ * колонки таблицы сравнения про свой код и индекс, серия «созданные MR» на графике и вторая ось Y.
+ * Поставьте true, чтобы снова показать.
+ */
+const SHOW_CREATION_METRICS_AND_EFFECTIVENESS = false
+
+function activityChartVisibility(
+  stored: Record<ActivitySeriesKey, boolean> | undefined,
+): Record<ActivitySeriesKey, boolean> {
+  const v = stored ?? ACTIVITY_SERIES_DEFAULT_VISIBILITY
+  return SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? v : { ...v, mrsCreated: false }
+}
+
 /** Подсказки к заголовкам таблицы сравнения периодов (нативный title / курсор help). */
 const COMPARE_TABLE_COL_HINTS = {
   user: 'Логин GitLab и отображаемое имя (если известно из списка или пресета).',
@@ -976,14 +990,13 @@ export default function App() {
 
   const detailItemsFiltered = useMemo(() => {
     if (!detailChartKey) return detailItems
-    const vis =
-      chartVisibilityByChartKey[detailChartKey] ?? ACTIVITY_SERIES_DEFAULT_VISIBILITY
+    const vis = activityChartVisibility(chartVisibilityByChartKey[detailChartKey])
     return detailItems.filter((item) => {
       if (item.kind === 'approved') return vis.approved
       if (item.kind === 'commented') return vis.commented
       return vis.mrsCreated
     })
-  }, [detailItems, detailChartKey, chartVisibilityByChartKey])
+  }, [detailItems, detailChartKey, chartVisibilityByChartKey, SHOW_CREATION_METRICS_AND_EFFECTIVENESS])
 
   const showCompareUserColumn = compareUserCount > 1 && comparePeriodCount === 1
   const showComparePeriodColumn = comparePeriodCount > 1 && compareUserCount === 1
@@ -998,6 +1011,7 @@ export default function App() {
   }, [flatPeriodResults])
 
   const singlePeriodEffectiveness = useMemo(() => {
+    if (!SHOW_CREATION_METRICS_AND_EFFECTIVENESS) return null
     if (userBundles?.length !== 1 || flatPeriodResults.length !== 1) return null
     return effectivenessScoreFromPeriod(flatPeriodResults[0])
   }, [userBundles, flatPeriodResults])
@@ -1190,10 +1204,12 @@ export default function App() {
                           )}
                           {renderCompareSortTh(
                             'linesPerComm',
-                            'compare-table-review',
+                            SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? 'compare-table-review' : 'compare-table-review compare-table-metric-group-start',
                             COMPARE_TABLE_COL_HINTS.linesPerComm,
                             'Стр./комм.',
                           )}
+                          {SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? (
+                            <>
                           {renderCompareSortTh(
                             'mrsCreated',
                             'compare-table-metric-group-start',
@@ -1224,11 +1240,15 @@ export default function App() {
                             COMPARE_TABLE_COL_HINTS.effectiveness,
                             'Индекс',
                           )}
+                            </>
+                          ) : null}
                         </tr>
                       </thead>
                       <tbody>
                         {sortedCompareTableRows.map((pr) => {
-                          const ev = effectivenessScoreFromPeriod(pr)
+                          const ev = SHOW_CREATION_METRICS_AND_EFFECTIVENESS
+                            ? effectivenessScoreFromPeriod(pr)
+                            : null
                           return (
                             <tr key={pr.chartKey}>
                             {showCompareUserColumn ? (
@@ -1252,7 +1272,17 @@ export default function App() {
                             <td className="compare-table-review">
                               {formatCommentsPerApproval(pr.stats.approved, pr.stats.commented)}
                             </td>
-                            <td className="compare-table-review">{pr.stats.avgLinesPerComment}</td>
+                            <td
+                              className={
+                                SHOW_CREATION_METRICS_AND_EFFECTIVENESS
+                                  ? 'compare-table-review'
+                                  : 'compare-table-review compare-table-metric-group-start'
+                              }
+                            >
+                              {pr.stats.avgLinesPerComment}
+                            </td>
+                            {SHOW_CREATION_METRICS_AND_EFFECTIVENESS && ev ? (
+                              <>
                             <td className="compare-table-metric-group-start">{pr.stats.mrsCreated}</td>
                             <td>{pr.stats.createdMrsDiffLines}</td>
                             <td>{pr.stats.avgCreatedMrsDiffLinesPerDay}</td>
@@ -1263,6 +1293,8 @@ export default function App() {
                             >
                               {ev.score}
                             </td>
+                              </>
+                            ) : null}
                           </tr>
                           )
                         })}
@@ -1274,7 +1306,7 @@ export default function App() {
 
               {userBundles?.length === 1 && flatPeriodResults.length === 1 ? (
                 <>
-                  {singlePeriodEffectiveness ? (
+                  {SHOW_CREATION_METRICS_AND_EFFECTIVENESS && singlePeriodEffectiveness ? (
                     <section
                       className="effectiveness-banner card"
                       aria-labelledby="effectiveness-title"
@@ -1363,6 +1395,7 @@ export default function App() {
                     </div>
                   </section>
 
+                  {SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? (
                   <section
                     className="stat-group stat-group--own"
                     aria-labelledby="stat-group-own"
@@ -1406,6 +1439,7 @@ export default function App() {
                       </article>
                     </div>
                   </section>
+                  ) : null}
                 </div>
                 </>
               ) : null}
@@ -1430,9 +1464,18 @@ export default function App() {
               Активность по дням
             </h2>
             <p className="chart-lead">
-              По дням (часовой пояс браузера): одобрения и комментарии в MR — левая шкала (количество событий);
-              созданные вами MR <strong>в develop или dev</strong> — <strong>правая шкала</strong> (сумма строк диффа в MR за день; число MR — во
-              всплывающей подсказке).
+              {SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? (
+                <>
+                  По дням (часовой пояс браузера): одобрения и комментарии в MR — левая шкала (количество событий);
+                  созданные вами MR <strong>в develop или dev</strong> — <strong>правая шкала</strong> (сумма строк диффа
+                  в MR за день; число MR — во всплывающей подсказке).
+                </>
+              ) : (
+                <>
+                  По дням (часовой пояс браузера): столбцы — число <strong>одобрений</strong> и число{' '}
+                  <strong>комментариев</strong> в чужих MR (одна шкала Y, события за день).
+                </>
+              )}
               {flatPeriodResults.length > 1
                 ? compareUserCount > 1
                   ? ' Ниже — график для каждого сотрудника за один и тот же период; клик по дню откроет детали выбранного графика.'
@@ -1452,7 +1495,8 @@ export default function App() {
                   onDayClick={
                     pr.activityByDay.length > 0 ? (day) => openDayDetail(day, pr.chartKey) : undefined
                   }
-                  visibility={chartVisibilityByChartKey[pr.chartKey] ?? ACTIVITY_SERIES_DEFAULT_VISIBILITY}
+                  visibility={activityChartVisibility(chartVisibilityByChartKey[pr.chartKey])}
+                  showMrsCreatedSeries={SHOW_CREATION_METRICS_AND_EFFECTIVENESS}
                   onVisibilityChange={(next) =>
                     setChartVisibilityByChartKey((m) => ({ ...m, [pr.chartKey]: next }))
                   }
