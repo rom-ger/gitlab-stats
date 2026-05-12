@@ -1326,6 +1326,29 @@ app.post('/api/activity-by-day', async (req, res) => {
   const foreignMrCommentCount = commentedList.length
   const avgLinesPerComment =
     foreignMrCommentCount > 0 ? approvedMrsDiffLinesTotal / foreignMrCommentCount : null
+
+  const mrsCreatedDiffLinesByDay = new Array<number>(days.length).fill(0)
+  for (const row of mrList) {
+    const iso = row.created_at
+    if (typeof iso !== 'string') continue
+    const day = dayKeyInTimeZone(iso, timeZone)
+    const idx = indexByDay.get(day)
+    if (idx === undefined) continue
+    const m = asRecord(row)
+    const pid = asPositiveInt(m['project_id'])
+    const iid = asPositiveInt(m['iid'])
+    const mapKey = pid != null && iid != null ? mrTargetKey(pid, iid) : null
+    let lines = 0
+    if (mapKey != null && mrDiffLinesByKey.has(mapKey)) {
+      lines = mrDiffLinesByKey.get(mapKey) ?? 0
+    } else {
+      const { lines: listLines } = readMrSizeFromMergeRequestListItem(m)
+      lines =
+        listLines != null && Number.isFinite(listLines) ? Math.max(0, Math.trunc(listLines)) : 0
+    }
+    mrsCreatedDiffLinesByDay[idx] += lines
+  }
+
   const detailByDay = buildDetailByDay(
     base,
     paths,
@@ -1343,6 +1366,7 @@ app.post('/api/activity-by-day', async (req, res) => {
     approved,
     commented,
     mrsCreated,
+    mrsCreatedDiffLinesByDay,
     timeZone,
     detailByDay,
     approvedMrsDiffLinesTotal,

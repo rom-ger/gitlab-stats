@@ -42,6 +42,8 @@ const COMPARE_TABLE_COL_HINTS = {
     'Сумма добавленных и удалённых строк по диффу для уникальных merge request, созданных пользователем за период.',
   avgCreatedDiffPerDay:
     'Средняя сумма строк диффа по созданным MR на один календарный день выбранного периода (сумма диффа созданных MR / число дней в ряду).',
+  avgCreatedDiffPerMr:
+    'Средняя сумма строк диффа на один созданный merge request: сумма диффа по уникальным созданным MR за период, делённая на число созданных MR (как в колонке «MR»).',
   commPerAppr:
     'Отношение числа комментариев в чужих MR к числу одобрений за тот же период (комментариев на одно одобрение).',
   linesPerComm:
@@ -55,6 +57,7 @@ type Stats = {
   approvedMrsDiffLines: string
   createdMrsDiffLines: string
   avgCreatedMrsDiffLinesPerDay: string
+  avgCreatedMrsDiffLinesPerMr: string
   avgLinesPerComment: string
 }
 
@@ -436,6 +439,7 @@ export default function App() {
         approved: number[]
         commented: number[]
         mrsCreated: number[]
+        mrsCreatedDiffLinesByDay?: number[]
         detailByDay: Record<string, DayDetailItem[]>
         approvedMrsDiffLinesTotal: number
         createdMrsDiffLinesTotal?: number
@@ -473,6 +477,14 @@ export default function App() {
             minimumFractionDigits: 0,
           })
         : '—'
+    const mrsCreatedNum = Number.parseInt(mrsRes.total, 10)
+    const avgCreatedPerMrStr =
+      Number.isFinite(mrsCreatedNum) && mrsCreatedNum > 0
+        ? (createdDiffTotal / mrsCreatedNum).toLocaleString('ru-RU', {
+            maximumFractionDigits: 1,
+            minimumFractionDigits: 0,
+          })
+        : '—'
     const avgLines =
       byDayRes.avgLinesPerComment != null && Number.isFinite(byDayRes.avgLinesPerComment)
         ? byDayRes.avgLinesPerComment.toLocaleString('ru-RU', {
@@ -488,6 +500,7 @@ export default function App() {
       approvedMrsDiffLines: diffLinesTotal.toLocaleString('ru-RU'),
       createdMrsDiffLines: createdDiffTotal.toLocaleString('ru-RU'),
       avgCreatedMrsDiffLinesPerDay: avgCreatedPerDayStr,
+      avgCreatedMrsDiffLinesPerMr: avgCreatedPerMrStr,
       avgLinesPerComment: avgLines,
     }
 
@@ -496,6 +509,7 @@ export default function App() {
       approved: byDayRes.approved[i] ?? 0,
       commented: byDayRes.commented[i] ?? 0,
       mrsCreated: byDayRes.mrsCreated[i] ?? 0,
+      mrsCreatedDiffLines: byDayRes.mrsCreatedDiffLinesByDay?.[i] ?? 0,
     }))
 
     return {
@@ -752,6 +766,9 @@ export default function App() {
                           <th scope="col" title={COMPARE_TABLE_COL_HINTS.avgCreatedDiffPerDay}>
                             Ср. стр./день (созд.)
                           </th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.avgCreatedDiffPerMr}>
+                            Ср. стр./MR (созд.)
+                          </th>
                           <th scope="col" title={COMPARE_TABLE_COL_HINTS.commPerAppr}>
                             Комм./одобр.
                           </th>
@@ -772,6 +789,7 @@ export default function App() {
                             <td>{pr.stats.approvedMrsDiffLines}</td>
                             <td>{pr.stats.createdMrsDiffLines}</td>
                             <td>{pr.stats.avgCreatedMrsDiffLinesPerDay}</td>
+                            <td>{pr.stats.avgCreatedMrsDiffLinesPerMr}</td>
                             <td>{formatCommentsPerApproval(pr.stats.approved, pr.stats.commented)}</td>
                             <td>{pr.stats.avgLinesPerComment}</td>
                           </tr>
@@ -784,25 +802,33 @@ export default function App() {
 
               {periodResults.length === 1 ? (
                 <div className="stat-groups">
-                  <section className="stat-group stat-group--reviews" aria-labelledby="stat-group-reviews">
+                  <section
+                    className="stat-group stat-group--reviews"
+                    aria-labelledby="stat-group-reviews"
+                    title="Одобрения и комментарии в чужих merge request. Наведите на карточку — краткое пояснение метрики."
+                  >
                     <h3 className="stat-group-title" id="stat-group-reviews">
                       Рецензирование
                     </h3>
-                    <p className="stat-group-lead">Одобрения и комментарии в чужих merge request</p>
-                    <div className="stat-grid stat-grid--in-group">
-                      <article className="stat-card stat-approved">
+                    <div className="stat-grid stat-grid--in-group stat-grid--compact">
+                      <article
+                        className="stat-card stat-approved"
+                        title="События с действием approved в GitLab."
+                      >
                         <div className="stat-label">Одобренных MR</div>
                         <div className="stat-value">{periodResults[0].stats.approved}</div>
-                        <p className="stat-caption">События с действием approved</p>
                       </article>
-                      <article className="stat-card stat-comments">
+                      <article
+                        className="stat-card stat-comments"
+                        title="Только комментарии в merge request других авторов; комментарии в ваших собственных MR не учитываются."
+                      >
                         <div className="stat-label">Комментариев</div>
                         <div className="stat-value">{periodResults[0].stats.commented}</div>
-                        <p className="stat-caption">
-                          Только комментарии в MR <strong>других</strong> авторов; ваши собственные MR не учитываются.
-                        </p>
                       </article>
-                      <article className="stat-card stat-ratio">
+                      <article
+                        className="stat-card stat-ratio"
+                        title="Отношение числа комментариев в чужих MR к числу одобрений за тот же период."
+                      >
                         <div className="stat-label">Комментариев на одно одобрение</div>
                         <div className="stat-value stat-value--ratio">
                           {formatCommentsPerApproval(
@@ -810,56 +836,64 @@ export default function App() {
                             periodResults[0].stats.commented,
                           )}
                         </div>
-                        <p className="stat-caption">
-                          Отношение таких комментариев к числу одобрений за период.
-                        </p>
                       </article>
-                      <article className="stat-card stat-diff-lines">
+                      <article
+                        className="stat-card stat-diff-lines"
+                        title="Сумма добавленных и удалённых строк по диффу для уникальных merge request из событий одобрения (approved) за период."
+                      >
                         <div className="stat-label">Строк диффа в одобрённых MR</div>
                         <div className="stat-value">{periodResults[0].stats.approvedMrsDiffLines}</div>
-                        <p className="stat-caption">
-                          Сумма добавленных и удалённых строк по диффу для <strong>уникальных</strong> merge request из
-                          событий approved.
-                        </p>
                       </article>
-                      <article className="stat-card stat-avg-lines">
+                      <article
+                        className="stat-card stat-avg-lines"
+                        title="Отношение суммы строк диффа в одобрённых MR к числу комментариев в чужих MR за тот же период."
+                      >
                         <div className="stat-label">Строк диффа на 1 комментарий</div>
                         <div className="stat-value stat-value--ratio">{periodResults[0].stats.avgLinesPerComment}</div>
-                        <p className="stat-caption">
-                          Отношение суммы строк из предыдущей карточки к числу комментариев в <strong>чужих</strong> MR за
-                          тот же период.
-                        </p>
                       </article>
                     </div>
                   </section>
 
-                  <section className="stat-group stat-group--own" aria-labelledby="stat-group-own">
+                  <section
+                    className="stat-group stat-group--own"
+                    aria-labelledby="stat-group-own"
+                    title="Созданные вами merge request и размер изменений в них. Наведите на карточку — пояснение."
+                  >
                     <h3 className="stat-group-title" id="stat-group-own">
                       Собственный код
                     </h3>
-                    <p className="stat-group-lead">Созданные вами merge request и размер изменений в них</p>
-                    <div className="stat-grid stat-grid--in-group">
-                      <article className="stat-card stat-created">
+                    <div className="stat-grid stat-grid--in-group stat-grid--compact">
+                      <article
+                        className="stat-card stat-created"
+                        title="Число merge request с вами в роли автора, созданных за период (как в GitLab)."
+                      >
                         <div className="stat-label">Созданных MR</div>
                         <div className="stat-value">{periodResults[0].stats.mrsCreated}</div>
-                        <p className="stat-caption">MR с автором-пользователем.</p>
                       </article>
-                      <article className="stat-card stat-created-diff">
+                      <article
+                        className="stat-card stat-created-diff"
+                        title="Сумма добавлений и удалений по диффу для уникальных MR, созданных за период; те же величины, что в детализации по дню."
+                      >
                         <div className="stat-label">Строк диффа в созданных MR</div>
                         <div className="stat-value">{periodResults[0].stats.createdMrsDiffLines}</div>
-                        <p className="stat-caption">
-                          Сумма добавлений и удалений по диффу для <strong>уникальных</strong> созданных за период MR
-                          (те же данные, что в детализации по дню).
-                        </p>
                       </article>
-                      <article className="stat-card stat-created-per-day">
+                      <article
+                        className="stat-card stat-created-per-day"
+                        title="Сумма строк диффа по созданным MR, делённая на число календарных дней в выбранном периоде (длина ряда графика)."
+                      >
                         <div className="stat-label">Средняя сумма строк диффа в день</div>
                         <div className="stat-value stat-value--ratio">
                           {periodResults[0].stats.avgCreatedMrsDiffLinesPerDay}
                         </div>
-                        <p className="stat-caption">
-                          Сумма строк диффа по созданным MR, делённая на число календарных дней в выбранном периоде.
-                        </p>
+                      </article>
+                      <article
+                        className="stat-card stat-created-per-mr"
+                        title="Сумма строк диффа по уникальным созданным MR, делённая на число созданных MR (тот же счётчик, что в карточке «Созданных MR»)."
+                      >
+                        <div className="stat-label">Средняя сумма строк диффа на 1 MR</div>
+                        <div className="stat-value stat-value--ratio">
+                          {periodResults[0].stats.avgCreatedMrsDiffLinesPerMr}
+                        </div>
                       </article>
                     </div>
                   </section>
@@ -886,7 +920,9 @@ export default function App() {
               Активность по дням
             </h2>
             <p className="chart-lead">
-              Распределение по календарным дням в часовом поясе браузера: созданные MR, одобрения и комментарии в MR.
+              По дням (часовой пояс браузера): одобрения и комментарии в MR — левая шкала (количество событий);
+              созданные вами MR — <strong>правая шкала</strong> (сумма строк диффа в MR за день; число MR — во
+              всплывающей подсказке).
               {periodResults.length > 1
                 ? ' Ниже — отдельный график для каждого периода; детализация по клику относится к выбранному графику.'
                 : ''}

@@ -1,11 +1,14 @@
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { formatDayRu } from './chartDates'
 
 export type ActivitySeriesPoint = {
   day: string
   approved: number
   commented: number
+  /** Число MR, созданных в этот день (для подсказки и детализации). */
   mrsCreated: number
+  /** Сумма строк диффа (добавления+удаления) по MR, созданным в этот день — отдельная шкала Y. */
+  mrsCreatedDiffLines: number
 }
 
 const COLORS = {
@@ -27,19 +30,64 @@ type SeriesKey = ActivitySeriesKey
 const SERIES_ORDER: SeriesKey[] = ['mrsCreated', 'approved', 'commented']
 
 const SERIES_LABEL: Record<SeriesKey, string> = {
-  mrsCreated: 'Создание MR',
+  mrsCreated: 'Созд. MR — строки диффа',
   approved: 'Одобрение MR',
   commented: 'Комментарий в чужом MR',
 }
 
-function maxVisibleInSeries(points: ActivitySeriesPoint[], visibility: Record<SeriesKey, boolean>): number {
+function maxLeftAxis(points: ActivitySeriesPoint[], visibility: Record<SeriesKey, boolean>): number {
   let m = 0
   for (const p of points) {
-    for (const k of SERIES_ORDER) {
-      if (visibility[k]) m = Math.max(m, p[k])
-    }
+    if (visibility.approved) m = Math.max(m, p.approved)
+    if (visibility.commented) m = Math.max(m, p.commented)
   }
   return m
+}
+
+/**
+ * Верх правой шкалы без «раздувания» из‑за единичного дня с гигантским диффом:
+ * при подозрительном выбросе масштаб по p99/p95, столбцы выше шкалы упираются вверх (точное значение в подсказке).
+ */
+function rightAxisScaleMax(
+  diffValues: readonly number[],
+  mrsSeriesOn: boolean,
+): { yTop: number; clipped: boolean } {
+  if (!mrsSeriesOn) return { yTop: 1, clipped: false }
+  const positive = diffValues.filter((x) => Number.isFinite(x) && x > 0)
+  if (positive.length === 0) return { yTop: 1, clipped: false }
+  const sorted = [...positive].sort((a, b) => a - b)
+  const rawMax = sorted[sorted.length - 1]!
+  const n = sorted.length
+  const at = (fraction: number) =>
+    sorted[Math.max(0, Math.min(n - 1, Math.floor((n - 1) * fraction)))]!
+
+  const p99 = at(0.99)
+  const p95 = at(0.95)
+  const p90 = at(0.9)
+
+  const spike = rawMax > Math.max(p99 * 4, p95 * 14, 3000)
+  if (!spike) {
+    return { yTop: Math.max(1, Math.ceil(rawMax * 1.08)), clipped: false }
+  }
+  const yTop = Math.max(1, Math.ceil(Math.max(p99 * 1.12, p95 * 1.45, p90 * 2, rawMax * 0.02)))
+  return { yTop, clipped: rawMax > yTop }
+}
+
+function axisTicks(yTop: number): number[] {
+  const tickCount = Math.min(5, yTop)
+  return Array.from(
+    new Set(Array.from({ length: tickCount + 1 }, (_, i) => Math.round((yTop * i) / tickCount))),
+  ).sort((a, b) => a - b)
+}
+
+function formatMrSeriesTooltip(p: ActivitySeriesPoint, scaleMax: number): string {
+  const lines = p.mrsCreatedDiffLines.toLocaleString('ru-RU')
+  const base =
+    p.mrsCreated > 0 ? `${lines} стр. · ${p.mrsCreated} MR` : `${lines} стр.`
+  if (p.mrsCreatedDiffLines > scaleMax) {
+    return `${base} (выше подписи шкалы — ${scaleMax.toLocaleString('ru-RU')} стр.)`
+  }
+  return base
 }
 
 function tooltipPosition(clientX: number, clientY: number, rowCount: number): { left: number; top: number } {
@@ -73,6 +121,9 @@ export function ActivityByDayChart({
   visibility?: Record<SeriesKey, boolean>
   onVisibilityChange?: (next: Record<SeriesKey, boolean>) => void
 }) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [scrollViewportWidth, setScrollViewportWidth] = useState(0)
+
   const [hover, setHover] = useState<{
     point: ActivitySeriesPoint
     left: number
@@ -84,22 +135,65 @@ export function ActivityByDayChart({
   const isControlled = visibilityControlled != null && onVisibilityChange != null
   const visibility = isControlled ? visibilityControlled : visibilityInternal
 
+  const visibilityLayoutKey = `${visibility.approved ? 1 : 0}${visibility.commented ? 1 : 0}${visibility.mrsCreated ? 1 : 0}`
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const measure = () => {
+      const w = el.getBoundingClientRect().width
+      setScrollViewportWidth(Number.isFinite(w) && w > 0 ? w : 0)
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [points.length, visibilityLayoutKey])
+
   if (points.length === 0) return null
 
-  const W = 720
   const H = 260
-  const padL = 36
-  const padR = 12
+  const showLeft = visibility.approved || visibility.commented
+  const showRight = visibility.mrsCreated
+  const padL = showLeft ? 40 : 26
+  const padR = showRight ? 44 : 12
   const padT = 16
   const padB = 52
-  const innerW = W - padL - padR
+
+  const diffSeries = points.map((p) => p.mrsCreatedDiffLines)
+  const { yTop: yTopRight, clipped: rightAxisClipped } = rightAxisScaleMax(diffSeries, showRight)
+
+  const maxL = maxLeftAxis(points, visibility)
+  const yTopLeft = !showLeft || maxL <= 0 ? 1 : Math.ceil(maxL * 1.08)
+
+  /** Минимальная ширина «дня» в координатах SVG; плюс не уже видимой области контейнера (на всю ширину окна). */
+  const minUnitsPerDay = 4.25
+  const baseInnerMin = 720 - padL - padR
+  const innerMax = 5600 - padL - padR
+  const fillFromViewport =
+    scrollViewportWidth > 0 ? Math.max(0, scrollViewportWidth - padL - padR) : 0
+  const innerW = Math.min(
+    innerMax,
+    Math.max(baseInnerMin, Math.ceil(points.length * minUnitsPerDay), fillFromViewport),
+  )
+  const W = padL + innerW + padR
   const innerH = H - padT - padB
+
+  function yForLeft(v: number): number {
+    return padT + innerH * (1 - v / yTopLeft)
+  }
+  function yForRight(v: number): number {
+    return padT + innerH * (1 - v / yTopRight)
+  }
+
+  const y0 = padT + innerH
+
+  const ticksLeft = showLeft ? axisTicks(yTopLeft) : []
+  const ticksRight = showRight ? axisTicks(yTopRight) : []
+  const gridTicks = showLeft ? ticksLeft : ticksRight
 
   const activeKeys = SERIES_ORDER.filter((k) => visibility[k])
   const visibleCount = activeKeys.length
-
-  const maxVal = maxVisibleInSeries(points, visibility)
-  const yTop = maxVal <= 0 ? 1 : Math.ceil(maxVal * 1.08)
 
   const n = points.length
   const groupW = innerW / n
@@ -110,19 +204,8 @@ export function ActivityByDayChart({
       : 0
   const clusterW = visibleCount * barW + Math.max(0, visibleCount - 1) * innerGap
 
-  /** Плотность подписей по X: до ~24 отметок на ширину графика. */
   const approxXLabelSlots = 24
   const labelEvery = n <= approxXLabelSlots ? 1 : Math.max(1, Math.ceil(n / approxXLabelSlots))
-
-  function yFor(v: number): number {
-    return padT + innerH * (1 - v / yTop)
-  }
-
-  const y0 = yFor(0)
-  const tickCount = Math.min(5, yTop)
-  const ticks = Array.from(
-    new Set(Array.from({ length: tickCount + 1 }, (_, i) => Math.round((yTop * i) / tickCount))),
-  ).sort((a, b) => a - b)
 
   function toggleSeries(key: SeriesKey) {
     const apply = (prev: Record<SeriesKey, boolean>) => {
@@ -141,10 +224,12 @@ export function ActivityByDayChart({
 
   return (
     <div className="activity-chart">
-      <svg
-        className="activity-chart-svg"
+      <div className="activity-chart-scroll" ref={scrollRef}>
+        <svg
+        className="activity-chart-svg activity-chart-svg--sized"
+        width={W}
+        height={H}
         viewBox={`0 0 ${W} ${H}`}
-        preserveAspectRatio="xMidYMid meet"
       >
         <line
           x1={padL}
@@ -155,10 +240,10 @@ export function ActivityByDayChart({
           strokeWidth={1}
         />
 
-        {ticks.map((t) => {
-          const y = yFor(t)
+        {gridTicks.map((t) => {
+          const y = showLeft ? yForLeft(t) : yForRight(t)
           return (
-            <g key={t}>
+            <g key={`grid-${t}`}>
               <line
                 x1={padL - 4}
                 y1={y}
@@ -168,18 +253,45 @@ export function ActivityByDayChart({
                 strokeOpacity={0.35}
                 strokeWidth={1}
               />
-              <text
-                x={padL - 8}
-                y={y + 4}
-                textAnchor="end"
-                className="activity-chart-tick"
-                fontSize={10}
-              >
-                {t}
-              </text>
             </g>
           )
         })}
+
+        {showLeft
+          ? ticksLeft.map((t) => {
+              const y = yForLeft(t)
+              return (
+                <text
+                  key={`L-${t}`}
+                  x={padL - 8}
+                  y={y + 4}
+                  textAnchor="end"
+                  className="activity-chart-tick"
+                  fontSize={10}
+                >
+                  {t}
+                </text>
+              )
+            })
+          : null}
+
+        {showRight
+          ? ticksRight.map((t) => {
+              const y = yForRight(t)
+              return (
+                <text
+                  key={`R-${t}`}
+                  x={W - padR + 6}
+                  y={y + 4}
+                  textAnchor="start"
+                  className="activity-chart-tick activity-chart-tick--right"
+                  fontSize={10}
+                >
+                  {t}
+                </text>
+              )
+            })
+          : null}
 
         {points.map((p, i) => {
           const colX = padL + i * groupW
@@ -202,10 +314,13 @@ export function ActivityByDayChart({
               ) : null}
 
               {activeKeys.map((key, j) => {
-                const v = p[key]
-                const h = y0 - yFor(v)
+                const isMr = key === 'mrsCreated'
+                const vRaw = isMr ? p.mrsCreatedDiffLines : (p[key] as number)
+                const vPlot = isMr ? Math.min(vRaw, yTopRight) : vRaw
+                const yScale = isMr ? yForRight : yForLeft
+                const h = y0 - yScale(vPlot)
                 const x = barStartX + j * (barW + innerGap)
-                const y = yFor(v)
+                const y = yScale(vPlot)
                 return (
                   <rect
                     key={key}
@@ -272,7 +387,8 @@ export function ActivityByDayChart({
             </g>
           )
         })}
-      </svg>
+        </svg>
+      </div>
 
       {hover ? (
         <div
@@ -288,7 +404,11 @@ export function ActivityByDayChart({
                   <span className="activity-chart-tooltip-dot" style={{ background: COLORS[key] }} />
                   {SERIES_LABEL[key]}
                 </dt>
-                <dd>{hover.point[key]}</dd>
+                <dd>
+                  {key === 'mrsCreated'
+                    ? formatMrSeriesTooltip(hover.point, yTopRight)
+                    : hover.point[key]}
+                </dd>
               </div>
             ))}
           </dl>
@@ -302,6 +422,11 @@ export function ActivityByDayChart({
               type="button"
               className={`activity-chart-legend-btn${visibility[key] ? '' : ' activity-chart-legend-btn--off'}`}
               aria-pressed={visibility[key]}
+              title={
+                key === 'mrsCreated'
+                  ? 'Столбцы по правой шкале: сумма строк диффа в MR, созданных в этот день. Число MR — во всплывающей подсказке.'
+                  : undefined
+              }
               onClick={() => toggleSeries(key)}
             >
               <span className="activity-chart-swatch" style={{ background: COLORS[key] }} aria-hidden />
@@ -310,6 +435,26 @@ export function ActivityByDayChart({
           </li>
         ))}
       </ul>
+      {showLeft && showRight ? (
+        <p className="activity-chart-axis-note" aria-hidden>
+          Левая шкала — одобрения и комментарии (шт.), правая — строки диффа в созданных MR.
+          {rightAxisClipped
+            ? ' На длинных периодах правая шкала без редких выбросов: столбец до верха — значение выше подписи; точное число в подсказке.'
+            : ''}{' '}
+          Длинный ряд дней — прокрутка графика по горизонтали.
+        </p>
+      ) : showRight && !showLeft ? (
+        <p className="activity-chart-axis-note" aria-hidden>
+          {rightAxisClipped
+            ? 'Шкала без редких выбросов; столбец до верха — значение выше подписи (см. подсказку). '
+            : ''}
+          Длинный период — прокрутка по горизонтали.
+        </p>
+      ) : points.length > 90 ? (
+        <p className="activity-chart-axis-note" aria-hidden>
+          Длинный период — прокрутка графика по горизонтали.
+        </p>
+      ) : null}
     </div>
   )
 }
