@@ -1,4 +1,11 @@
-import { type FormEvent, type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   TEAM_USERS,
 } from './teamPresets'
@@ -8,7 +15,12 @@ import {
   savePersistedForm,
   type PersistedPeriod,
 } from './formPersistence'
-import { ActivityByDayChart, type ActivitySeriesPoint } from './ActivityByDayChart'
+import {
+  ActivityByDayChart,
+  ACTIVITY_SERIES_DEFAULT_VISIBILITY,
+  type ActivitySeriesKey,
+  type ActivitySeriesPoint,
+} from './ActivityByDayChart'
 import { formatDayRu } from './chartDates'
 import './App.css'
 
@@ -26,6 +38,10 @@ const COMPARE_TABLE_COL_HINTS = {
   mrsCreated: 'Число merge request с автором-пользователем, созданных за период.',
   diffLines:
     'Сумма добавленных и удалённых строк по диффу для уникальных MR из событий одобрения за период.',
+  createdDiffLines:
+    'Сумма добавленных и удалённых строк по диффу для уникальных merge request, созданных пользователем за период.',
+  avgCreatedDiffPerDay:
+    'Средняя сумма строк диффа по созданным MR на один календарный день выбранного периода (сумма диффа созданных MR / число дней в ряду).',
   commPerAppr:
     'Отношение числа комментариев в чужих MR к числу одобрений за тот же период (комментариев на одно одобрение).',
   linesPerComm:
@@ -37,6 +53,8 @@ type Stats = {
   commented: string
   mrsCreated: string
   approvedMrsDiffLines: string
+  createdMrsDiffLines: string
+  avgCreatedMrsDiffLinesPerDay: string
   avgLinesPerComment: string
 }
 
@@ -202,6 +220,9 @@ export default function App() {
   const [detailDay, setDetailDay] = useState<string | null>(null)
   const [detailPeriodId, setDetailPeriodId] = useState<string | null>(null)
   const [detailItems, setDetailItems] = useState<DayDetailItem[]>([])
+  const [chartVisibilityByPeriod, setChartVisibilityByPeriod] = useState<
+    Record<string, Record<ActivitySeriesKey, boolean>>
+  >({})
   const [settingsOpen, setSettingsOpen] = useState(false)
 
   const primaryStartDate = periodRows[0]?.startDate?.trim() ?? ''
@@ -417,6 +438,7 @@ export default function App() {
         mrsCreated: number[]
         detailByDay: Record<string, DayDetailItem[]>
         approvedMrsDiffLinesTotal: number
+        createdMrsDiffLinesTotal?: number
         foreignMrCommentCount: number
         avgLinesPerComment: number | null
       }>('/api/activity-by-day', {
@@ -439,6 +461,18 @@ export default function App() {
       typeof byDayRes.approvedMrsDiffLinesTotal === 'number' && Number.isFinite(byDayRes.approvedMrsDiffLinesTotal)
         ? byDayRes.approvedMrsDiffLinesTotal
         : 0
+    const createdDiffTotal =
+      typeof byDayRes.createdMrsDiffLinesTotal === 'number' && Number.isFinite(byDayRes.createdMrsDiffLinesTotal)
+        ? byDayRes.createdMrsDiffLinesTotal
+        : 0
+    const calendarDays = byDayRes.days.length
+    const avgCreatedPerDayStr =
+      calendarDays > 0
+        ? (createdDiffTotal / calendarDays).toLocaleString('ru-RU', {
+            maximumFractionDigits: 1,
+            minimumFractionDigits: 0,
+          })
+        : '—'
     const avgLines =
       byDayRes.avgLinesPerComment != null && Number.isFinite(byDayRes.avgLinesPerComment)
         ? byDayRes.avgLinesPerComment.toLocaleString('ru-RU', {
@@ -452,6 +486,8 @@ export default function App() {
       commented: String(commentCount),
       mrsCreated: mrsRes.total,
       approvedMrsDiffLines: diffLinesTotal.toLocaleString('ru-RU'),
+      createdMrsDiffLines: createdDiffTotal.toLocaleString('ru-RU'),
+      avgCreatedMrsDiffLinesPerDay: avgCreatedPerDayStr,
       avgLinesPerComment: avgLines,
     }
 
@@ -480,6 +516,7 @@ export default function App() {
     setDetailDay(null)
     setDetailPeriodId(null)
     setDetailItems([])
+    setChartVisibilityByPeriod({})
     setResolvedName(null)
 
     if (!periodRows[0]?.startDate.trim()) {
@@ -621,6 +658,17 @@ export default function App() {
   const detailContextPeriod =
     detailPeriodId && periodResults ? periodResults.find((p) => p.id === detailPeriodId) : undefined
 
+  const detailItemsFiltered = useMemo(() => {
+    if (!detailPeriodId) return detailItems
+    const vis =
+      chartVisibilityByPeriod[detailPeriodId] ?? ACTIVITY_SERIES_DEFAULT_VISIBILITY
+    return detailItems.filter((item) => {
+      if (item.kind === 'approved') return vis.approved
+      if (item.kind === 'commented') return vis.commented
+      return vis.mrsCreated
+    })
+  }, [detailItems, detailPeriodId, chartVisibilityByPeriod])
+
   return (
     <div className="shell">
       <header className="app-bar">
@@ -696,7 +744,13 @@ export default function App() {
                             MR
                           </th>
                           <th scope="col" title={COMPARE_TABLE_COL_HINTS.diffLines}>
-                            Стр. диффа
+                            Стр. диффа (одобр.)
+                          </th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.createdDiffLines}>
+                            Стр. диффа (созд.)
+                          </th>
+                          <th scope="col" title={COMPARE_TABLE_COL_HINTS.avgCreatedDiffPerDay}>
+                            Ср. стр./день (созд.)
                           </th>
                           <th scope="col" title={COMPARE_TABLE_COL_HINTS.commPerAppr}>
                             Комм./одобр.
@@ -716,6 +770,8 @@ export default function App() {
                             <td>{pr.stats.commented}</td>
                             <td>{pr.stats.mrsCreated}</td>
                             <td>{pr.stats.approvedMrsDiffLines}</td>
+                            <td>{pr.stats.createdMrsDiffLines}</td>
+                            <td>{pr.stats.avgCreatedMrsDiffLinesPerDay}</td>
                             <td>{formatCommentsPerApproval(pr.stats.approved, pr.stats.commented)}</td>
                             <td>{pr.stats.avgLinesPerComment}</td>
                           </tr>
@@ -727,49 +783,86 @@ export default function App() {
               ) : null}
 
               {periodResults.length === 1 ? (
-                <div className="stat-grid">
-                  <article className="stat-card stat-approved">
-                    <div className="stat-label">Одобренных MR</div>
-                    <div className="stat-value">{periodResults[0].stats.approved}</div>
-                    <p className="stat-caption">События с действием approved</p>
-                  </article>
-                  <article className="stat-card stat-comments">
-                    <div className="stat-label">Комментариев</div>
-                    <div className="stat-value">{periodResults[0].stats.commented}</div>
-                    <p className="stat-caption">
-                      Только комментарии в MR <strong>других</strong> авторов; ваши собственные MR не учитываются.
-                    </p>
-                  </article>
-                  <article className="stat-card stat-created">
-                    <div className="stat-label">Созданных MR</div>
-                    <div className="stat-value">{periodResults[0].stats.mrsCreated}</div>
-                    <p className="stat-caption">MR с автором-пользователем.</p>
-                  </article>
-                  <article className="stat-card stat-ratio">
-                    <div className="stat-label">Комментариев на одно одобрение</div>
-                    <div className="stat-value stat-value--ratio">
-                      {formatCommentsPerApproval(periodResults[0].stats.approved, periodResults[0].stats.commented)}
+                <div className="stat-groups">
+                  <section className="stat-group stat-group--reviews" aria-labelledby="stat-group-reviews">
+                    <h3 className="stat-group-title" id="stat-group-reviews">
+                      Рецензирование
+                    </h3>
+                    <p className="stat-group-lead">Одобрения и комментарии в чужих merge request</p>
+                    <div className="stat-grid stat-grid--in-group">
+                      <article className="stat-card stat-approved">
+                        <div className="stat-label">Одобренных MR</div>
+                        <div className="stat-value">{periodResults[0].stats.approved}</div>
+                        <p className="stat-caption">События с действием approved</p>
+                      </article>
+                      <article className="stat-card stat-comments">
+                        <div className="stat-label">Комментариев</div>
+                        <div className="stat-value">{periodResults[0].stats.commented}</div>
+                        <p className="stat-caption">
+                          Только комментарии в MR <strong>других</strong> авторов; ваши собственные MR не учитываются.
+                        </p>
+                      </article>
+                      <article className="stat-card stat-ratio">
+                        <div className="stat-label">Комментариев на одно одобрение</div>
+                        <div className="stat-value stat-value--ratio">
+                          {formatCommentsPerApproval(
+                            periodResults[0].stats.approved,
+                            periodResults[0].stats.commented,
+                          )}
+                        </div>
+                        <p className="stat-caption">
+                          Отношение таких комментариев к числу одобрений за период.
+                        </p>
+                      </article>
+                      <article className="stat-card stat-diff-lines">
+                        <div className="stat-label">Строк диффа в одобрённых MR</div>
+                        <div className="stat-value">{periodResults[0].stats.approvedMrsDiffLines}</div>
+                        <p className="stat-caption">
+                          Сумма добавленных и удалённых строк по диффу для <strong>уникальных</strong> merge request из
+                          событий approved.
+                        </p>
+                      </article>
+                      <article className="stat-card stat-avg-lines">
+                        <div className="stat-label">Строк диффа на 1 комментарий</div>
+                        <div className="stat-value stat-value--ratio">{periodResults[0].stats.avgLinesPerComment}</div>
+                        <p className="stat-caption">
+                          Отношение суммы строк из предыдущей карточки к числу комментариев в <strong>чужих</strong> MR за
+                          тот же период.
+                        </p>
+                      </article>
                     </div>
-                    <p className="stat-caption">
-                      Отношение таких комментариев к числу одобрений за период;
-                    </p>
-                  </article>
-                  <article className="stat-card stat-diff-lines">
-                    <div className="stat-label">Строк диффа в одобрённых MR</div>
-                    <div className="stat-value">{periodResults[0].stats.approvedMrsDiffLines}</div>
-                    <p className="stat-caption">
-                      Сумма добавленных и удалённых строк по диффу для <strong>уникальных</strong> merge request из
-                      событий approved.
-                    </p>
-                  </article>
-                  <article className="stat-card stat-avg-lines">
-                    <div className="stat-label">Строк диффа на 1 комментарий</div>
-                    <div className="stat-value stat-value--ratio">{periodResults[0].stats.avgLinesPerComment}</div>
-                    <p className="stat-caption">
-                      Отношение суммы строк из предыдущей карточки к числу комментариев в <strong>чужих</strong> MR за
-                      тот же период;
-                    </p>
-                  </article>
+                  </section>
+
+                  <section className="stat-group stat-group--own" aria-labelledby="stat-group-own">
+                    <h3 className="stat-group-title" id="stat-group-own">
+                      Собственный код
+                    </h3>
+                    <p className="stat-group-lead">Созданные вами merge request и размер изменений в них</p>
+                    <div className="stat-grid stat-grid--in-group">
+                      <article className="stat-card stat-created">
+                        <div className="stat-label">Созданных MR</div>
+                        <div className="stat-value">{periodResults[0].stats.mrsCreated}</div>
+                        <p className="stat-caption">MR с автором-пользователем.</p>
+                      </article>
+                      <article className="stat-card stat-created-diff">
+                        <div className="stat-label">Строк диффа в созданных MR</div>
+                        <div className="stat-value">{periodResults[0].stats.createdMrsDiffLines}</div>
+                        <p className="stat-caption">
+                          Сумма добавлений и удалений по диффу для <strong>уникальных</strong> созданных за период MR
+                          (те же данные, что в детализации по дню).
+                        </p>
+                      </article>
+                      <article className="stat-card stat-created-per-day">
+                        <div className="stat-label">Средняя сумма строк диффа в день</div>
+                        <div className="stat-value stat-value--ratio">
+                          {periodResults[0].stats.avgCreatedMrsDiffLinesPerDay}
+                        </div>
+                        <p className="stat-caption">
+                          Сумма строк диффа по созданным MR, делённая на число календарных дней в выбранном периоде.
+                        </p>
+                      </article>
+                    </div>
+                  </section>
                 </div>
               ) : null}
             </>
@@ -811,6 +904,10 @@ export default function App() {
                   onDayClick={
                     pr.activityByDay.length > 0 ? (day) => openDayDetail(day, pr.id) : undefined
                   }
+                  visibility={chartVisibilityByPeriod[pr.id] ?? ACTIVITY_SERIES_DEFAULT_VISIBILITY}
+                  onVisibilityChange={(next) =>
+                    setChartVisibilityByPeriod((m) => ({ ...m, [pr.id]: next }))
+                  }
                 />
               </div>
             ))}
@@ -829,14 +926,19 @@ export default function App() {
                   </button>
                 </div>
                 <p className="day-detail-hint">
-                  Список событий за день совпадает с данными графика. Ссылки ведут в GitLab. Размер MR (строки и/или
-                  файлы) показывается, если эти поля уже были в ответах API при загрузке периода.
+                  Список событий за день учитывает видимые на графике серии (легенда под графиком): скрытые типы не
+                  показываются. Ссылки ведут в GitLab. Размер MR (строки и/или файлы) — из ответов API при загрузке
+                  периода.
                 </p>
-                {detailItems.length === 0 ? (
-                  <p className="day-detail-empty">За этот день событий не найдено.</p>
+                {detailItemsFiltered.length === 0 ? (
+                  <p className="day-detail-empty">
+                    {detailItems.length === 0
+                      ? 'За этот день событий не найдено.'
+                      : 'Нет событий выбранных типов — включите серии в легенде графика.'}
+                  </p>
                 ) : (
                   <ul className="day-detail-list">
-                    {detailItems.map((item) => {
+                    {detailItemsFiltered.map((item) => {
                       const sizeBadge = dayDetailMrSizeBadge(item)
                       return (
                       <li key={item.id} className="day-detail-item">

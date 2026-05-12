@@ -1318,6 +1318,11 @@ app.post('/api/activity-by-day', async (req, res) => {
   ])
   const approvedMrsDiffLinesTotal = diffBundle.approvedMrsDiffLinesTotal
   const mrDiffLinesByKey = diffBundle.byKey
+  const createdTargets = uniqueMergeRequestTargetsFromMrList(mrList)
+  let createdMrsDiffLinesTotal = 0
+  for (const t of createdTargets) {
+    createdMrsDiffLinesTotal += mrDiffLinesByKey.get(mrTargetKey(t.pid, t.iid)) ?? 0
+  }
   const foreignMrCommentCount = commentedList.length
   const avgLinesPerComment =
     foreignMrCommentCount > 0 ? approvedMrsDiffLinesTotal / foreignMrCommentCount : null
@@ -1341,6 +1346,7 @@ app.post('/api/activity-by-day', async (req, res) => {
     timeZone,
     detailByDay,
     approvedMrsDiffLinesTotal,
+    createdMrsDiffLinesTotal,
     foreignMrCommentCount,
     avgLinesPerComment,
   })

@@ -14,7 +14,15 @@ const COLORS = {
   mrsCreated: '#2da44e',
 } as const
 
-type SeriesKey = keyof typeof COLORS
+export type ActivitySeriesKey = keyof typeof COLORS
+
+export const ACTIVITY_SERIES_DEFAULT_VISIBILITY: Record<ActivitySeriesKey, boolean> = {
+  mrsCreated: true,
+  approved: true,
+  commented: true,
+}
+
+type SeriesKey = ActivitySeriesKey
 
 const SERIES_ORDER: SeriesKey[] = ['mrsCreated', 'approved', 'commented']
 
@@ -51,27 +59,30 @@ function tooltipPosition(clientX: number, clientY: number, rowCount: number): { 
   return { left, top }
 }
 
-const defaultVisibility: Record<SeriesKey, boolean> = {
-  mrsCreated: true,
-  approved: true,
-  commented: true,
-}
-
 export function ActivityByDayChart({
   points,
   selectedDay = null,
   onDayClick,
+  visibility: visibilityControlled,
+  onVisibilityChange,
 }: {
   points: ActivitySeriesPoint[]
   selectedDay?: string | null
   onDayClick?: (day: string) => void
+  /** Если задано вместе с onVisibilityChange — контролируемая легенда (фильтр серий). */
+  visibility?: Record<SeriesKey, boolean>
+  onVisibilityChange?: (next: Record<SeriesKey, boolean>) => void
 }) {
   const [hover, setHover] = useState<{
     point: ActivitySeriesPoint
     left: number
     top: number
   } | null>(null)
-  const [visibility, setVisibility] = useState<Record<SeriesKey, boolean>>(defaultVisibility)
+  const [visibilityInternal, setVisibilityInternal] = useState<Record<SeriesKey, boolean>>(
+    ACTIVITY_SERIES_DEFAULT_VISIBILITY,
+  )
+  const isControlled = visibilityControlled != null && onVisibilityChange != null
+  const visibility = isControlled ? visibilityControlled : visibilityInternal
 
   if (points.length === 0) return null
 
@@ -114,11 +125,16 @@ export function ActivityByDayChart({
   ).sort((a, b) => a - b)
 
   function toggleSeries(key: SeriesKey) {
-    setVisibility((prev) => {
+    const apply = (prev: Record<SeriesKey, boolean>) => {
       const on = SERIES_ORDER.filter((k) => prev[k]).length
       if (prev[key] && on <= 1) return prev
       return { ...prev, [key]: !prev[key] }
-    })
+    }
+    if (isControlled) {
+      onVisibilityChange!(apply(visibilityControlled))
+    } else {
+      setVisibilityInternal(apply)
+    }
   }
 
   const tooltipRows = SERIES_ORDER.filter((k) => visibility[k])
