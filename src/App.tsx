@@ -35,15 +35,16 @@ const COMPARE_TABLE_COL_HINTS = {
   approved: 'Количество событий одобрения merge request (approved) за период.',
   commented:
     'Комментарии пользователя в merge request других авторов; комментарии в собственных MR не учитываются.',
-  mrsCreated: 'Число merge request с автором-пользователем, созданных за период.',
+  mrsCreated:
+    'Число merge request с автором-пользователем за период с целевой веткой develop или dev (GitLab target_branch).',
   diffLines:
     'Сумма добавленных и удалённых строк по диффу для уникальных MR из событий одобрения за период.',
   createdDiffLines:
-    'Сумма добавленных и удалённых строк по диффу для уникальных merge request, созданных пользователем за период.',
+    'Сумма строк диффа по уникальным MR автора с target_branch develop или dev, созданным за период.',
   avgCreatedDiffPerDay:
-    'Средняя сумма строк диффа по созданным MR на один календарный день выбранного периода (сумма диффа созданных MR / число дней в ряду).',
+    'Средняя сумма строк диффа по таким MR на календарный день периода (сумма / число дней в ряду).',
   avgCreatedDiffPerMr:
-    'Средняя сумма строк диффа на один созданный merge request: сумма диффа по уникальным созданным MR за период, делённая на число созданных MR (как в колонке «MR»).',
+    'Средняя сумма строк диффа на один такой MR: сумма диффа / число MR в колонке «MR» (только develop и dev).',
   commPerAppr:
     'Отношение числа комментариев в чужих MR к числу одобрений за тот же период (комментариев на одно одобрение).',
   linesPerComm:
@@ -857,7 +858,7 @@ export default function App() {
                   <section
                     className="stat-group stat-group--own"
                     aria-labelledby="stat-group-own"
-                    title="Созданные вами merge request и размер изменений в них. Наведите на карточку — пояснение."
+                    title="Созданные вами MR с merge в develop или dev (target_branch) и размер диффа. Наведите на карточку — пояснение."
                   >
                     <h3 className="stat-group-title" id="stat-group-own">
                       Собственный код
@@ -865,21 +866,21 @@ export default function App() {
                     <div className="stat-grid stat-grid--in-group stat-grid--compact">
                       <article
                         className="stat-card stat-created"
-                        title="Число merge request с вами в роли автора, созданных за период (как в GitLab)."
+                        title="Число MR с вами автором и целевой веткой develop или dev (GitLab target_branch), созданных за период."
                       >
                         <div className="stat-label">Созданных MR</div>
                         <div className="stat-value">{periodResults[0].stats.mrsCreated}</div>
                       </article>
                       <article
                         className="stat-card stat-created-diff"
-                        title="Сумма добавлений и удалений по диффу для уникальных MR, созданных за период; те же величины, что в детализации по дню."
+                        title="Сумма диффа по уникальным MR автора с target_branch develop или dev за период; те же величины, что в детализации по дню."
                       >
                         <div className="stat-label">Строк диффа в созданных MR</div>
                         <div className="stat-value">{periodResults[0].stats.createdMrsDiffLines}</div>
                       </article>
                       <article
                         className="stat-card stat-created-per-day"
-                        title="Сумма строк диффа по созданным MR, делённая на число календарных дней в выбранном периоде (длина ряда графика)."
+                        title="Сумма строк диффа по MR в develop/dev, делённая на число календарных дней периода."
                       >
                         <div className="stat-label">Средняя сумма строк диффа в день</div>
                         <div className="stat-value stat-value--ratio">
@@ -888,7 +889,7 @@ export default function App() {
                       </article>
                       <article
                         className="stat-card stat-created-per-mr"
-                        title="Сумма строк диффа по уникальным созданным MR, делённая на число созданных MR (тот же счётчик, что в карточке «Созданных MR»)."
+                        title="Сумма диффа по таким MR, делённая на их число (карточка «Созданных MR» — только develop и dev)."
                       >
                         <div className="stat-label">Средняя сумма строк диффа на 1 MR</div>
                         <div className="stat-value stat-value--ratio">
@@ -921,7 +922,7 @@ export default function App() {
             </h2>
             <p className="chart-lead">
               По дням (часовой пояс браузера): одобрения и комментарии в MR — левая шкала (количество событий);
-              созданные вами MR — <strong>правая шкала</strong> (сумма строк диффа в MR за день; число MR — во
+              созданные вами MR <strong>в develop или dev</strong> — <strong>правая шкала</strong> (сумма строк диффа в MR за день; число MR — во
               всплывающей подсказке).
               {periodResults.length > 1
                 ? ' Ниже — отдельный график для каждого периода; детализация по клику относится к выбранному графику.'

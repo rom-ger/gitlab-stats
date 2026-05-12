@@ -424,7 +424,7 @@ export function ActivityByDayChart({
               aria-pressed={visibility[key]}
               title={
                 key === 'mrsCreated'
-                  ? 'Столбцы по правой шкале: сумма строк диффа в MR, созданных в этот день. Число MR — во всплывающей подсказке.'
+                  ? 'Столбцы по правой шкале: сумма строк диффа в MR за день (только target_branch develop или dev). Число MR — в подсказке.'
                   : undefined
               }
               onClick={() => toggleSeries(key)}

@@ -43,6 +43,22 @@ const MAX_LIST_PAGES = 400
 /** Пагинация GET /users — верхняя граница страниц (100 пользователей на страницу). */
 const MAX_USER_LIST_PAGES = 200
 
+/**
+ * Учитываются только MR автора с target_branch из списка (merge в develop или в dev).
+ * При необходимости добавьте ветки в этот массив.
+ */
+const AUTHOR_MR_TARGET_BRANCHES = ['develop', 'dev'] as const
+
+function mrTargetBranchAllowed(raw: unknown): boolean {
+  if (typeof raw !== 'string' || !raw.trim()) return false
+  const lower = raw.trim().toLowerCase()
+  return (AUTHOR_MR_TARGET_BRANCHES as readonly string[]).includes(lower)
+}
+
+function filterMrsByAllowedTargetBranch(rows: GitlabItem[]): GitlabItem[] {
+  return rows.filter((row) => mrTargetBranchAllowed(asRecord(row)['target_branch']))
+}
+
 function compareYmd(a: string, b: string): number {
   if (a < b) return -1
   if (a > b) return 1
@@ -971,17 +987,18 @@ async function collectGitlabPagesOnly(
 }
 
 /** HEAD (или GET), читаем X-Total как у списков с пагинацией. */
-async function respondWithGitlabListTotal(
-  res: express.Response,
+async function readGitlabListTotalNumber(
   url: string,
   token: string,
-): Promise<void> {
+): Promise<
+  | { ok: true; total: number; httpStatus: number }
+  | { ok: false; status: number; message: string }
+> {
   let response: Response
   try {
     response = await gitlabFetch(url, token.trim(), 'HEAD')
   } catch {
-    res.status(502).json({ error: 'Не удалось подключиться к GitLab.' })
-    return
+    return { ok: false, status: 502, message: 'Не удалось подключиться к GitLab.' }
   }
 
   let total = readXTotal(response.headers)
@@ -991,22 +1008,37 @@ async function respondWithGitlabListTotal(
       response = await gitlabFetch(url, token.trim(), 'GET')
       total = readXTotal(response.headers)
     } catch {
-      res.status(502).json({ error: 'Не удалось подключиться к GitLab.' })
-      return
+      return { ok: false, status: 502, message: 'Не удалось подключиться к GitLab.' }
     }
   }
 
   if (!response.ok && total == null) {
     const text = await response.text().catch(() => '')
-    res.status(response.status).json({
-      error: `GitLab ответил ${response.status}. ${text.slice(0, 400)}`,
-    })
+    return {
+      ok: false,
+      status: response.status >= 400 && response.status < 600 ? response.status : 502,
+      message: `GitLab ответил ${response.status}. ${text.slice(0, 400)}`,
+    }
+  }
+
+  const n = Number.parseInt(total ?? '0', 10)
+  return { ok: true, total: Number.isFinite(n) ? n : 0, httpStatus: response.status }
+}
+
+async function respondWithGitlabListTotal(
+  res: express.Response,
+  url: string,
+  token: string,
+): Promise<void> {
+  const r = await readGitlabListTotalNumber(url, token)
+  if (!r.ok) {
+    res.status(r.status).json({ error: r.message })
     return
   }
 
   res.json({
-    total: total ?? '0',
-    status: response.status,
+    total: String(r.total),
+    status: r.httpStatus,
   })
 }
 
@@ -1161,7 +1193,7 @@ app.post('/api/merge-requests-total', async (req, res) => {
   }
 
   const base = normalizeBaseUrl(gitlabUrl)
-  const params = new URLSearchParams({
+  const baseMrParams = new URLSearchParams({
     author_id: String(userId),
     created_after: createdAfter.trim(),
     created_before: createdBefore.trim(),
@@ -1169,8 +1201,26 @@ app.post('/api/merge-requests-total', async (req, res) => {
     state: 'all',
     scope: 'all',
   })
-  const url = `${base}/api/v4/merge_requests?${params}`
-  await respondWithGitlabListTotal(res, url, token.trim())
+
+  let sum = 0
+  let lastHttpStatus = 200
+  for (const branch of AUTHOR_MR_TARGET_BRANCHES) {
+    const p = new URLSearchParams(baseMrParams)
+    p.set('target_branch', branch)
+    const url = `${base}/api/v4/merge_requests?${p}`
+    const r = await readGitlabListTotalNumber(url, token.trim())
+    if (!r.ok) {
+      res.status(r.status).json({ error: r.message })
+      return
+    }
+    sum += r.total
+    lastHttpStatus = r.httpStatus
+  }
+
+  res.json({
+    total: String(sum),
+    status: lastHttpStatus,
+  })
 })
 
 const ymdRe = /^\d{4}-\d{2}-\d{2}$/
@@ -1232,7 +1282,7 @@ app.post('/api/activity-by-day', async (req, res) => {
   const noteEventsUrl = (page: number) =>
     `${base}/api/v4/users/${userId}/events?${userEventsSearch({ target_type: 'note' })}&page=${page}`
 
-  const mrParams = new URLSearchParams({
+  const mrBaseParams = new URLSearchParams({
     author_id: String(userId),
     created_after: ra,
     created_before: rb,
@@ -1240,16 +1290,22 @@ app.post('/api/activity-by-day', async (req, res) => {
     state: 'all',
     scope: 'all',
   })
-  const mrUrl = (page: number) => `${base}/api/v4/merge_requests?${mrParams}&page=${page}`
 
-  const [approvedRes, commentedRes, noteRes, mrRes] = await Promise.all([
+  const mrCollectTasks = AUTHOR_MR_TARGET_BRANCHES.map((branch) => {
+    const p = new URLSearchParams(mrBaseParams)
+    p.set('target_branch', branch)
+    const mrUrl = (page: number) => `${base}/api/v4/merge_requests?${p}&page=${page}`
+    return collectGitlabPagesOnly(mrUrl, token.trim())
+  })
+
+  const [approvedRes, commentedRes, noteRes, ...mrResList] = await Promise.all([
     collectGitlabPagesOnly(approvedUrl, token.trim()),
     collectGitlabPagesOnly(commentedUrl, token.trim()),
     collectGitlabPagesOnly(noteEventsUrl, token.trim()),
-    collectGitlabPagesOnly(mrUrl, token.trim()),
+    ...mrCollectTasks,
   ])
 
-  for (const result of [approvedRes, commentedRes, noteRes, mrRes]) {
+  for (const result of [approvedRes, commentedRes, noteRes, ...mrResList]) {
     if (!result.ok) {
       const status = result.status >= 400 && result.status < 600 ? result.status : 502
       res.status(status).json({
@@ -1273,7 +1329,9 @@ app.post('/api/activity-by-day', async (req, res) => {
     userId,
     commentedDeduped,
   )
-  const mrList = mrRes.items
+  const mrList = dedupEventsById(
+    filterMrsByAllowedTargetBranch(mrResList.flatMap((r) => (r.ok ? r.items : []))),
+  )
 
   const days = enumerateYmdInclusive(sd, ed)
   const approved = new Array<number>(days.length).fill(0)
