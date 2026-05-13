@@ -228,6 +228,15 @@ function isNoteTargetType(tt: string): boolean {
   )
 }
 
+/** SHA из push_data: GitLab иногда отдаёт короткий префикс; «нулевой» object id не считаем коммитом. */
+function pushDataCommitSha(v: unknown): string | null {
+  if (typeof v !== 'string') return null
+  const sha = v.trim()
+  if (!/^[a-f0-9]{6,64}$/i.test(sha)) return null
+  if (/^0+$/i.test(sha)) return null
+  return sha
+}
+
 function eventTitle(e: Record<string, unknown>): string {
   const tt = e['target_title']
   if (typeof tt === 'string' && tt.trim()) return tt.trim()
@@ -242,8 +251,16 @@ function eventTitle(e: Record<string, unknown>): string {
   }
   const push = e['push_data']
   if (push && typeof push === 'object') {
-    const title = (push as Record<string, unknown>)['commit_title']
+    const pd = push as Record<string, unknown>
+    const title = pd['commit_title']
     if (typeof title === 'string' && title.trim()) return title.trim()
+    const refRaw = pd['ref']
+    if (typeof refRaw === 'string' && refRaw.trim()) {
+      const ref = refRaw.trim().replace(/^refs\/heads\//i, '').replace(/^refs\/tags\//i, '')
+      if (ref) return `Пуш: ${ref}`
+    }
+    const shaHint = pushDataCommitSha(pd['commit_to']) ?? pushDataCommitSha(pd['commit_from'])
+    if (shaHint) return `Пуш (${shaHint.length > 8 ? shaHint.slice(0, 8) : shaHint})`
   }
   return 'Событие'
 }
@@ -259,7 +276,11 @@ function pushEventIsMergeBranchCommitTitle(e: Record<string, unknown>): boolean 
   return title.toLowerCase().includes(MERGE_BRANCH_COMMIT_TITLE_NEEDLE)
 }
 
-/** Ссылка на конец пуша или на ветку в GitLab (если SHA нет). */
+/**
+ * Ссылка на пуш в GitLab.
+ * Предпочитаем SHA: короткий commit_to раньше не проходил regex (7+ символов) и тогда строился `/-/commits/…` по имени ветки —
+ * на инстансах с ветками `a/b` такие ссылки часто не открываются. «Нулевой» object id GitLab не считаем коммитом.
+ */
 function pushEventWebUrl(base: string, paths: Map<number, string>, e: Record<string, unknown>): string | null {
   const pid = asPositiveInt(e['project_id'])
   if (pid == null) return null
@@ -268,18 +289,20 @@ function pushEventWebUrl(base: string, paths: Map<number, string>, e: Record<str
   const push = e['push_data']
   if (!push || typeof push !== 'object') return `${base}/${pathNs}`
   const pd = push as Record<string, unknown>
-  const commitTo = pd['commit_to']
-  if (typeof commitTo === 'string' && commitTo.trim()) {
-    const sha = commitTo.trim()
-    if (/^[a-f0-9]{7,64}$/i.test(sha)) {
-      return `${base}/${pathNs}/-/commit/${sha}`
-    }
+  const commitTo = pushDataCommitSha(pd['commit_to'])
+  const commitFrom = pushDataCommitSha(pd['commit_from'])
+  if (commitTo) {
+    return `${base}/${pathNs}/-/commit/${commitTo}`
+  }
+  if (commitFrom) {
+    return `${base}/${pathNs}/-/commit/${commitFrom}`
   }
   const refRaw = pd['ref']
   if (typeof refRaw === 'string' && refRaw.trim()) {
     const ref = refRaw.trim().replace(/^refs\/heads\//i, '').replace(/^refs\/tags\//i, '')
     if (ref) {
-      return `${base}/${pathNs}/-/commits/${encodeURIComponent(ref)}`
+      const enc = ref.split('/').map((seg) => encodeURIComponent(seg)).join('%2F')
+      return `${base}/${pathNs}/-/commits/${enc}`
     }
   }
   return `${base}/${pathNs}`
