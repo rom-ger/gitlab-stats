@@ -1819,3 +1819,181 @@
   border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
+
+/* --- Комментарии по маркерам [!] [?] [S] [P] --- */
+
+.comment-markers-panel {
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: 0.55rem;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.comment-markers-panel-title {
+  margin: 0 0 0.65rem;
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--text-strong);
+}
+
+.comment-markers-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.comment-markers-summary--compact {
+  gap: 0;
+}
+
+.comment-markers-bar {
+  display: flex;
+  width: 100%;
+  height: 11px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.comment-markers-summary--compact .comment-markers-bar {
+  height: 7px;
+}
+
+.comment-markers-seg {
+  min-width: 2px;
+}
+
+.comment-markers-seg--bang {
+  background: linear-gradient(180deg, #ff7b72 0%, #f85149 100%);
+}
+
+.comment-markers-seg--query {
+  background: linear-gradient(180deg, #79c0ff 0%, #388bfd 100%);
+}
+
+.comment-markers-seg--s {
+  background: linear-gradient(180deg, #e3b341 0%, #bb8009 100%);
+}
+
+.comment-markers-seg--p {
+  background: linear-gradient(180deg, #56d364 0%, #238636 100%);
+}
+
+.comment-markers-seg--none {
+  background: linear-gradient(180deg, #8b949e 0%, #484f58 100%);
+}
+
+.comment-markers-dot.comment-markers-seg--bang {
+  background: #f85149;
+}
+.comment-markers-dot.comment-markers-seg--query {
+  background: #388bfd;
+}
+.comment-markers-dot.comment-markers-seg--s {
+  background: #bb8009;
+}
+.comment-markers-dot.comment-markers-seg--p {
+  background: #238636;
+}
+.comment-markers-dot.comment-markers-seg--none {
+  background: #6e7681;
+}
+
+.comment-markers-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.85rem;
+  font-size: 0.78rem;
+}
+
+.comment-markers-legend-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  color: var(--text-muted);
+}
+
+.comment-markers-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 2px;
+  flex-shrink: 0;
+  position: relative;
+  top: 0.12em;
+}
+
+.comment-markers-tag {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+}
+
+.comment-markers-num {
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.comment-markers-empty {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.compare-comment-count-btn {
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--accent-soft);
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.compare-comment-count-btn:hover {
+  color: var(--text-strong);
+}
+
+.compare-comment-count-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-glow);
+  border-radius: 0.2rem;
+}
+
+.comment-markers-modal-body {
+  padding: 0.75rem 1rem 0.5rem;
+}
+
+.day-detail-marker {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  padding: 0.1rem 0.28rem;
+  border-radius: 0.25rem;
+  line-height: 1.2;
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+}
+
+.day-detail-marker.comment-markers-seg--bang {
+  background: #f85149;
+}
+
+.day-detail-marker.comment-markers-seg--query {
+  background: #388bfd;
+}
+
+.day-detail-marker.comment-markers-seg--s {
+  background: #bb8009;
+}
+
+.day-detail-marker.comment-markers-seg--p {
+  background: #238636;
+}

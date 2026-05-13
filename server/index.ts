@@ -298,6 +298,34 @@ function eventCommentBody(e: Record<string, unknown>): string | null {
   return t
 }
 
+type CommentMarkerCountKey = 'bang' | 'query' | 's' | 'p' | 'none'
+
+/** Маркер в начале текста комментария: `[!]`, `[?]`, `[S]`, `[P]` или отсутствует. */
+function commentMarkerFromCommentBody(body: string | null): CommentMarkerCountKey {
+  if (body == null || typeof body !== 'string') return 'none'
+  const t = body.replace(/\r\n/g, '\n').trimStart()
+  if (t.startsWith('[!]')) return 'bang'
+  if (t.startsWith('[?]')) return 'query'
+  if (t.startsWith('[S]')) return 's'
+  if (t.startsWith('[P]')) return 'p'
+  return 'none'
+}
+
+function buildCommentMarkerCounts(commentedList: GitlabItem[]): Record<CommentMarkerCountKey, number> {
+  const out: Record<CommentMarkerCountKey, number> = {
+    bang: 0,
+    query: 0,
+    s: 0,
+    p: 0,
+    none: 0,
+  }
+  for (const row of commentedList) {
+    const body = eventCommentBody(asRecord(row))
+    out[commentMarkerFromCommentBody(body)] += 1
+  }
+  return out
+}
+
 function eventWebUrl(
   base: string,
   paths: Map<number, string>,
@@ -1912,6 +1940,8 @@ app.post('/api/activity-by-day', async (req, res) => {
     approvedMrsDiffLinesTotal,
     createdMrsDiffLinesTotal,
     foreignMrCommentCount,
+    /** Разбивка комментариев в чужих MR по префиксу маркера в начале текста: [!], [?], [S], [P] или без маркера. */
+    commentMarkerCounts: buildCommentMarkerCounts(commentedList),
     avgLinesPerComment,
     /** Медиана по чужим MR: комментарии — (дифф) / (число комментариев); только одобрение без комментариев — отношение 0; плюс все одобрённые чужие MR. */
     medianLinesPerCommentByMr,

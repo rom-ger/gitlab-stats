@@ -26,6 +26,14 @@ import {
   type ActivitySeriesPoint,
 } from './ActivityByDayChart'
 import { formatDayRu } from './chartDates'
+import {
+  CommentMarkersSummary,
+  COMMENT_MARKER_META,
+  commentMarkerFromBody,
+  normalizeCommentMarkerCounts,
+  totalCommentMarkers,
+  type CommentMarkerCounts,
+} from './commentMarkers'
 import { effectivenessScoreFromPeriod } from './effectivenessScore'
 import './App.css'
 
@@ -60,7 +68,7 @@ const COMPARE_TABLE_COL_HINTS = {
   days: 'Число календарных дней в ряду графика активности (часовой пояс браузера).',
   approved: 'Количество событий одобрения merge request (approved) за период.',
   commented:
-    'Комментарии пользователя в merge request других авторов; комментарии в собственных MR не учитываются.',
+    'Комментарии пользователя в merge request других авторов; комментарии в собственных MR не учитываются. В таблице сравнения нажмите на число — разбивка по маркерам [!], [?], [S], [P] и без маркера.',
   pushCommits:
     'Число событий push в GitLab за день (каждое событие считается за 1). Пуши, у которых в заголовке коммита есть фраза «Merge branch», не учитываются.',
   mrsCreated:
@@ -112,6 +120,8 @@ type PeriodResult = {
   detailByDay: Record<string, DayDetailItem[]>
   /** MR, вошедшие в медиану «стр./комм.»; сортировка с сервера — по убыванию стр./комм. пользователя. */
   medianMrBreakdown: MedianMrBreakdownRow[]
+  /** Комментарии в чужих MR по маркеру в начале текста ([!], [?], [S], [P] или без). */
+  commentMarkers: CommentMarkerCounts
 }
 
 type CompareTableSortKey =
@@ -502,6 +512,7 @@ export default function App() {
     subtitle?: string
     rows: MedianMrBreakdownRow[]
   } | null>(null)
+  const [commentMarkersModal, setCommentMarkersModal] = useState<PeriodResult | null>(null)
 
   const primaryStartDate = periodRows[0]?.startDate?.trim() ?? ''
 
@@ -767,6 +778,7 @@ export default function App() {
       medianLinesPerCommentMrBreakdown?: unknown
       approvedEventsTotal?: number
       mergeRequestsCreatedTotal?: number
+      commentMarkerCounts?: Record<string, number>
     }>('/api/activity-by-day', {
       gitlabUrl,
       token,
@@ -842,6 +854,7 @@ export default function App() {
         : '—'
 
     const medianMrBreakdown = parseMedianMrBreakdown(byDayRes.medianLinesPerCommentMrBreakdown)
+    const commentMarkers = normalizeCommentMarkerCounts(byDayRes.commentMarkerCounts)
 
     const stats: Stats = {
       approved: approvedTotalStr,
@@ -879,6 +892,7 @@ export default function App() {
       activityByDay: points,
       detailByDay: byDayRes.detailByDay ?? {},
       medianMrBreakdown,
+      commentMarkers,
     }
   }
 
@@ -892,6 +906,7 @@ export default function App() {
     setComparePeriodCount(0)
     setCompareTableSort(null)
     setMedianMrModal(null)
+    setCommentMarkersModal(null)
 
     if (!userRows[0]?.username?.trim()) {
       setError('Укажите основного сотрудника (первая строка в списке).')
@@ -1428,7 +1443,20 @@ export default function App() {
                               <td className="compare-table-review">{pr.stats.approved}</td>
                             ) : null}
                             <td className="compare-table-review">{pr.stats.approvedMrsDiffLines}</td>
-                            <td className="compare-table-review">{pr.stats.commented}</td>
+                            <td className="compare-table-review">
+                              {Number.parseInt(pr.stats.commented, 10) > 0 ? (
+                                <button
+                                  type="button"
+                                  className="compare-comment-count-btn"
+                                  title="Разбивка комментариев по маркерам [!], [?], [S], [P] и без маркера"
+                                  onClick={() => setCommentMarkersModal(pr)}
+                                >
+                                  {pr.stats.commented}
+                                </button>
+                              ) : (
+                                pr.stats.commented
+                              )}
+                            </td>
                             <td className="compare-table-review">{pr.stats.pushCommits}</td>
                             <td className="compare-table-review">
                               {formatCommentsPerApproval(pr.stats.approved, pr.stats.commented)}
@@ -1591,6 +1619,13 @@ export default function App() {
                         </div>
                       </article>
                     </div>
+                    <div
+                      className="comment-markers-panel"
+                      title="Маркер — префикс в начале текста комментария в GitLab: [!], [?], [S], [P]; если ни одного нет — «без маркера». Учитываются только комментарии в чужих MR за период."
+                    >
+                      <h4 className="comment-markers-panel-title">Комментарии по маркерам</h4>
+                      <CommentMarkersSummary counts={flatPeriodResults[0].commentMarkers} />
+                    </div>
                   </section>
 
                   {SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? (
@@ -1745,12 +1780,24 @@ export default function App() {
                       <ul className="day-detail-list">
                         {filteredItems.map((item) => {
                           const sizeBadge = dayDetailMrSizeBadge(item)
+                          const commentMarker =
+                            item.kind === 'commented'
+                              ? commentMarkerFromBody(item.commentBody ?? null)
+                              : null
                           return (
                           <li key={item.id} className="day-detail-item">
                             <span className="day-detail-time">{formatEventTime(item.createdAt)}</span>
                             <div className="day-detail-body">
                               <div className="day-detail-line">
                                 <span className={dayDetailKindClass(item.kind)}>{dayDetailKindLabel(item.kind)}</span>
+                                {commentMarker && commentMarker !== 'none' ? (
+                                  <span
+                                    className={`day-detail-marker ${COMMENT_MARKER_META[commentMarker].barClass}`}
+                                    title={COMMENT_MARKER_META[commentMarker].shortLabel}
+                                  >
+                                    {COMMENT_MARKER_META[commentMarker].tag}
+                                  </span>
+                                ) : null}
                                 {item.webUrl ? (
                                   <a
                                     className="day-detail-link"
@@ -1869,6 +1916,55 @@ export default function App() {
               <p className="median-mr-modal-footnote">
                 Список отсортирован по убыванию «стр./комм.» сотрудника в MR — в том же порядке, что и для медианы.
                 MR только с одобрением и без комментариев сотрудника дают стр./комм. 0.
+              </p>
+            </div>
+          </div>
+        ) : null}
+        {commentMarkersModal ? (
+          <div className="median-mr-modal-layer" role="presentation">
+            <button
+              type="button"
+              className="median-mr-modal-backdrop"
+              aria-label="Закрыть"
+              onClick={() => setCommentMarkersModal(null)}
+            />
+            <div
+              className="median-mr-modal card"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="comment-markers-modal-title"
+            >
+              <div className="median-mr-modal-head">
+                <div>
+                  <h2 className="median-mr-modal-title" id="comment-markers-modal-title">
+                    Комментарии по маркерам
+                  </h2>
+                  <p className="median-mr-modal-subtitle">
+                    {compareUserCount > 1
+                      ? `${commentMarkersModal.userDisplayName} (${commentMarkersModal.userLogin}) · ${formatPeriodRangeShort(commentMarkersModal)}`
+                      : formatPeriodRangeShort(commentMarkersModal)}
+                  </p>
+                  <p className="median-mr-modal-count">
+                    Всего в чужих MR:{' '}
+                    <strong>
+                      {totalCommentMarkers(commentMarkersModal.commentMarkers).toLocaleString('ru-RU')}
+                    </strong>
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="median-mr-modal-close"
+                  onClick={() => setCommentMarkersModal(null)}
+                >
+                  Закрыть
+                </button>
+              </div>
+              <div className="median-mr-modal-table-wrap comment-markers-modal-body">
+                <CommentMarkersSummary counts={commentMarkersModal.commentMarkers} />
+              </div>
+              <p className="median-mr-modal-footnote">
+                Маркер — префикс в начале текста комментария в GitLab: [!], [?], [S], [P]; если ни одного нет —
+                категория «без маркера». Те же правила, что в детализации по дню.
               </p>
             </div>
           </div>
