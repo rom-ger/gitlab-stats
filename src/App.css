@@ -792,6 +792,10 @@
   background: radial-gradient(circle at 90% 10%, #6e49cb 0%, transparent 55%);
 }
 
+.stat-push-commits::before {
+  background: radial-gradient(circle at 90% 10%, #17a689 0%, transparent 55%);
+}
+
 .stat-created::before {
   background: radial-gradient(circle at 90% 10%, #2da44e 0%, transparent 55%);
 }
@@ -1219,6 +1223,11 @@
 .day-detail-kind--commented {
   color: #cfc2f0;
   background: rgba(110, 73, 203, 0.22);
+}
+
+.day-detail-kind--push {
+  color: #b8f0e8;
+  background: rgba(23, 166, 137, 0.22);
 }
 
 .day-detail-link {

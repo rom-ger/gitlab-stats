@@ -117,7 +117,7 @@ function dayKeyInTimeZone(iso: string, timeZone: string): string {
 
 type GitlabItem = { created_at?: unknown }
 
-type DayDetailKind = 'approved' | 'commented' | 'mr_created'
+type DayDetailKind = 'approved' | 'commented' | 'mr_created' | 'push_commits'
 
 type DayDetailItem = {
   id: string
@@ -246,6 +246,43 @@ function eventTitle(e: Record<string, unknown>): string {
     if (typeof title === 'string' && title.trim()) return title.trim()
   }
   return 'Событие'
+}
+
+const MERGE_BRANCH_COMMIT_TITLE_NEEDLE = 'merge branch'
+
+/** Событие push не учитываем в статистике коммитов, если заголовок коммита GitLab — типичное «Merge branch …». */
+function pushEventIsMergeBranchCommitTitle(e: Record<string, unknown>): boolean {
+  const push = e['push_data']
+  if (!push || typeof push !== 'object') return false
+  const title = (push as Record<string, unknown>)['commit_title']
+  if (typeof title !== 'string' || !title.trim()) return false
+  return title.toLowerCase().includes(MERGE_BRANCH_COMMIT_TITLE_NEEDLE)
+}
+
+/** Ссылка на конец пуша или на ветку в GitLab (если SHA нет). */
+function pushEventWebUrl(base: string, paths: Map<number, string>, e: Record<string, unknown>): string | null {
+  const pid = asPositiveInt(e['project_id'])
+  if (pid == null) return null
+  const pathNs = paths.get(pid)
+  if (!pathNs) return null
+  const push = e['push_data']
+  if (!push || typeof push !== 'object') return `${base}/${pathNs}`
+  const pd = push as Record<string, unknown>
+  const commitTo = pd['commit_to']
+  if (typeof commitTo === 'string' && commitTo.trim()) {
+    const sha = commitTo.trim()
+    if (/^[a-f0-9]{7,64}$/i.test(sha)) {
+      return `${base}/${pathNs}/-/commit/${sha}`
+    }
+  }
+  const refRaw = pd['ref']
+  if (typeof refRaw === 'string' && refRaw.trim()) {
+    const ref = refRaw.trim().replace(/^refs\/heads\//i, '').replace(/^refs\/tags\//i, '')
+    if (ref) {
+      return `${base}/${pathNs}/-/commits/${encodeURIComponent(ref)}`
+    }
+  }
+  return `${base}/${pathNs}`
 }
 
 const COMMENT_BODY_MAX_CHARS = 12_000
@@ -1223,6 +1260,7 @@ function buildDetailByDay(
   approvedList: GitlabItem[],
   commentedList: GitlabItem[],
   mrList: GitlabItem[],
+  pushedList: GitlabItem[],
   mrDiffLinesByKey: ReadonlyMap<string, number>,
   commentWebUrlByEventId?: Map<number, string>,
 ): Record<string, DayDetailItem[]> {
@@ -1327,6 +1365,24 @@ function buildDetailByDay(
       commentBody: null,
       mrDiffLines,
       mrChangesCount: listFiles,
+    })
+  }
+
+  for (const row of pushedList) {
+    const dk = dayOf(row)
+    if (!dk) continue
+    const e = asRecord(row)
+    const id = e['id']
+    const created = e['created_at']
+    out[dk].push({
+      id: `push-${typeof id === 'number' ? id : `${dk}-${out[dk].length}`}`,
+      kind: 'push_commits',
+      title: eventTitle(e),
+      createdAt: typeof created === 'string' ? created : '',
+      webUrl: pushEventWebUrl(base, paths, e),
+      commentBody: null,
+      mrDiffLines: null,
+      mrChangesCount: null,
     })
   }
 
@@ -1672,6 +1728,8 @@ app.post('/api/activity-by-day', async (req, res) => {
     `${base}/api/v4/users/${userId}/events?${userEventsSearch({ action: 'commented' })}&page=${page}`
   const noteEventsUrl = (page: number) =>
     `${base}/api/v4/users/${userId}/events?${userEventsSearch({ target_type: 'note' })}&page=${page}`
+  const pushedUrl = (page: number) =>
+    `${base}/api/v4/users/${userId}/events?${userEventsSearch({ action: 'pushed' })}&page=${page}`
 
   const mrBaseParams = new URLSearchParams({
     author_id: String(userId),
@@ -1689,14 +1747,15 @@ app.post('/api/activity-by-day', async (req, res) => {
     return collectGitlabPagesOnly(mrUrl, token.trim())
   })
 
-  const [approvedRes, commentedRes, noteRes, ...mrResList] = await Promise.all([
+  const [approvedRes, commentedRes, noteRes, pushedRes, ...mrResList] = await Promise.all([
     collectGitlabPagesOnly(approvedUrl, token.trim()),
     collectGitlabPagesOnly(commentedUrl, token.trim()),
     collectGitlabPagesOnly(noteEventsUrl, token.trim()),
+    collectGitlabPagesOnly(pushedUrl, token.trim()),
     ...mrCollectTasks,
   ])
 
-  for (const result of [approvedRes, commentedRes, noteRes, ...mrResList]) {
+  for (const result of [approvedRes, commentedRes, noteRes, pushedRes, ...mrResList]) {
     if (!result.ok) {
       const status = result.status >= 400 && result.status < 600 ? result.status : 502
       res.status(status).json({
@@ -1723,13 +1782,26 @@ app.post('/api/activity-by-day', async (req, res) => {
   const mrList = dedupEventsById(
     filterMrsByAllowedTargetBranch(mrResList.flatMap((r) => (r.ok ? r.items : []))),
   )
+  const pushedList = dedupEventsById(pushedRes.items).filter(
+    (row) => !pushEventIsMergeBranchCommitTitle(asRecord(row)),
+  )
 
   const days = enumerateYmdInclusive(sd, ed)
   const approved = new Array<number>(days.length).fill(0)
   const commented = new Array<number>(days.length).fill(0)
   const mrsCreated = new Array<number>(days.length).fill(0)
+  const pushCommits = new Array<number>(days.length).fill(0)
   const indexByDay = new Map<string, number>()
   days.forEach((d, i) => indexByDay.set(d, i))
+
+  for (const row of pushedList) {
+    const iso = row.created_at
+    if (typeof iso !== 'string') continue
+    const day = dayKeyInTimeZone(iso, timeZone)
+    const idx = indexByDay.get(day)
+    if (idx === undefined) continue
+    pushCommits[idx] += 1
+  }
 
   function bump(list: GitlabItem[], target: 'approved' | 'commented' | 'mrsCreated') {
     for (const row of list) {
@@ -1757,6 +1829,11 @@ app.post('/api/activity-by-day', async (req, res) => {
   for (const row of mrList) {
     const m = asRecord(row)
     const pid = asPositiveInt(m['project_id'])
+    if (pid != null) projectIds.push(pid)
+  }
+  for (const row of pushedList) {
+    const e = asRecord(row)
+    const pid = asPositiveInt(e['project_id'])
     if (pid != null) projectIds.push(pid)
   }
 
@@ -1815,6 +1892,7 @@ app.post('/api/activity-by-day', async (req, res) => {
     approvedList,
     commentedList,
     mrList,
+    pushedList,
     mrDiffLinesByKey,
     commentWebUrlByEventId,
   )
@@ -1824,6 +1902,10 @@ app.post('/api/activity-by-day', async (req, res) => {
     approved,
     commented,
     mrsCreated,
+    /** Число событий pushed за день (каждое событие = 1); с commit_title, содержащим «Merge branch», не учитываются. */
+    pushCommits,
+    /** Согласовано с рядом pushCommits: сумма по дням в календарном диапазоне. */
+    pushCommitsTotal: pushCommits.reduce((s, n) => s + n, 0),
     mrsCreatedDiffLinesByDay,
     timeZone,
     detailByDay,

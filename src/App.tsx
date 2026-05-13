@@ -46,8 +46,9 @@ const SHOW_CREATION_METRICS_AND_EFFECTIVENESS = false
 function activityChartVisibility(
   stored: Record<ActivitySeriesKey, boolean> | undefined,
 ): Record<ActivitySeriesKey, boolean> {
-  const v = stored ?? ACTIVITY_SERIES_DEFAULT_VISIBILITY
-  return SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? v : { ...v, mrsCreated: false }
+  const defaults = ACTIVITY_SERIES_DEFAULT_VISIBILITY
+  const merged = stored ? ({ ...defaults, ...stored } as Record<ActivitySeriesKey, boolean>) : defaults
+  return SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? merged : { ...merged, mrsCreated: false }
 }
 
 /** Подсказки к заголовкам таблицы сравнения периодов (нативный title / курсор help). */
@@ -59,6 +60,8 @@ const COMPARE_TABLE_COL_HINTS = {
   approved: 'Количество событий одобрения merge request (approved) за период.',
   commented:
     'Комментарии пользователя в merge request других авторов; комментарии в собственных MR не учитываются.',
+  pushCommits:
+    'Число событий push в GitLab за день (каждое событие считается за 1). Пуши, у которых в заголовке коммита есть фраза «Merge branch», не учитываются.',
   mrsCreated:
     'Число merge request с автором-пользователем за период с целевой веткой develop или dev (GitLab target_branch).',
   diffLines:
@@ -82,6 +85,7 @@ const COMPARE_TABLE_COL_HINTS = {
 type Stats = {
   approved: string
   commented: string
+  pushCommits: string
   mrsCreated: string
   approvedMrsDiffLines: string
   createdMrsDiffLines: string
@@ -116,6 +120,7 @@ type CompareTableSortKey =
   | 'approved'
   | 'approvedMrsDiffLines'
   | 'commented'
+  | 'pushCommits'
   | 'commPerAppr'
   | 'linesPerComm'
   | 'medianLinesPerCommMr'
@@ -134,6 +139,7 @@ const COMPARE_SORT_COL_LABELS: Record<CompareTableSortKey, string> = {
   approved: 'Одобр.',
   approvedMrsDiffLines: 'Стр. диффа (одобр.)',
   commented: 'Комм.',
+  pushCommits: 'Пуш-комм.',
   commPerAppr: 'Комм./одобр.',
   linesPerComm: 'Стр./комм.',
   medianLinesPerCommMr: 'Стр./комм. (мед.)',
@@ -209,6 +215,13 @@ function comparePeriodResultByKey(a: PeriodResult, b: PeriodResult, key: Compare
       const b0 = Number.isFinite(nb) ? nb : 0
       return a0 - b0
     }
+    case 'pushCommits': {
+      const na = Number.parseInt(a.stats.pushCommits, 10)
+      const nb = Number.parseInt(b.stats.pushCommits, 10)
+      const a0 = Number.isFinite(na) ? na : 0
+      const b0 = Number.isFinite(nb) ? nb : 0
+      return a0 - b0
+    }
     case 'commPerAppr':
       return compareNullableNumbers(commPerApprNumeric(a), commPerApprNumeric(b))
     case 'linesPerComm':
@@ -269,7 +282,7 @@ type UserResultsBundle = {
 
 type DayDetailItem = {
   id: string
-  kind: 'approved' | 'commented' | 'mr_created'
+  kind: 'approved' | 'commented' | 'mr_created' | 'push_commits'
   title: string
   createdAt: string
   webUrl: string | null
@@ -344,12 +357,14 @@ function formatEventTime(iso: string): string {
 function dayDetailKindLabel(kind: DayDetailItem['kind']): string {
   if (kind === 'mr_created') return 'MR'
   if (kind === 'approved') return 'Одобрение'
+  if (kind === 'push_commits') return 'Коммиты (push)'
   return 'Комментарий'
 }
 
 function dayDetailKindClass(kind: DayDetailItem['kind']): string {
   if (kind === 'mr_created') return 'day-detail-kind day-detail-kind--mr'
   if (kind === 'approved') return 'day-detail-kind day-detail-kind--approved'
+  if (kind === 'push_commits') return 'day-detail-kind day-detail-kind--push'
   return 'day-detail-kind day-detail-kind--commented'
 }
 
@@ -736,6 +751,8 @@ export default function App() {
       approved: number[]
       commented: number[]
       mrsCreated: number[]
+      pushCommits?: number[]
+      pushCommitsTotal?: number
       mrsCreatedDiffLinesByDay?: number[]
       detailByDay: Record<string, DayDetailItem[]>
       approvedMrsDiffLinesTotal: number
@@ -772,6 +789,13 @@ export default function App() {
     const commentedSum = byDayRes.commented.reduce((s, n) => s + (n ?? 0), 0)
     const commentCount =
       typeof byDayRes.foreignMrCommentCount === 'number' ? byDayRes.foreignMrCommentCount : commentedSum
+
+    const pushCommitsArr = Array.isArray(byDayRes.pushCommits) ? byDayRes.pushCommits : []
+    const pushCommitsTotalNum =
+      typeof byDayRes.pushCommitsTotal === 'number' && Number.isFinite(byDayRes.pushCommitsTotal)
+        ? Math.max(0, Math.trunc(byDayRes.pushCommitsTotal))
+        : pushCommitsArr.reduce((s, n) => s + (typeof n === 'number' && Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0), 0)
+    const pushCommitsTotalStr = String(pushCommitsTotalNum)
 
     const diffLinesTotal =
       typeof byDayRes.approvedMrsDiffLinesTotal === 'number' && Number.isFinite(byDayRes.approvedMrsDiffLinesTotal)
@@ -818,6 +842,7 @@ export default function App() {
     const stats: Stats = {
       approved: approvedTotalStr,
       commented: String(commentCount),
+      pushCommits: pushCommitsTotalStr,
       mrsCreated: mrsCreatedTotalStr,
       approvedMrsDiffLines: diffLinesTotal.toLocaleString('ru-RU'),
       createdMrsDiffLines: createdDiffTotal.toLocaleString('ru-RU'),
@@ -831,6 +856,7 @@ export default function App() {
       day,
       approved: byDayRes.approved[i] ?? 0,
       commented: byDayRes.commented[i] ?? 0,
+      pushCommits: pushCommitsArr[i] ?? 0,
       mrsCreated: byDayRes.mrsCreated[i] ?? 0,
       mrsCreatedDiffLines: byDayRes.mrsCreatedDiffLinesByDay?.[i] ?? 0,
     }))
@@ -1105,6 +1131,7 @@ export default function App() {
     return detailItems.filter((item) => {
       if (item.kind === 'approved') return vis.approved
       if (item.kind === 'commented') return vis.commented
+      if (item.kind === 'push_commits') return vis.pushCommits
       return vis.mrsCreated
     })
   }, [detailItems, detailChartKey, chartVisibilityByChartKey, SHOW_CREATION_METRICS_AND_EFFECTIVENESS])
@@ -1308,6 +1335,12 @@ export default function App() {
                             'Комм.',
                           )}
                           {renderCompareSortTh(
+                            'pushCommits',
+                            'compare-table-review',
+                            COMPARE_TABLE_COL_HINTS.pushCommits,
+                            'Пуш-комм.',
+                          )}
+                          {renderCompareSortTh(
                             'commPerAppr',
                             'compare-table-review',
                             COMPARE_TABLE_COL_HINTS.commPerAppr,
@@ -1388,6 +1421,7 @@ export default function App() {
                             ) : null}
                             <td className="compare-table-review">{pr.stats.approvedMrsDiffLines}</td>
                             <td className="compare-table-review">{pr.stats.commented}</td>
+                            <td className="compare-table-review">{pr.stats.pushCommits}</td>
                             <td className="compare-table-review">
                               {formatCommentsPerApproval(pr.stats.approved, pr.stats.commented)}
                             </td>
@@ -1495,6 +1529,13 @@ export default function App() {
                       >
                         <div className="stat-label">Комментариев</div>
                         <div className="stat-value">{flatPeriodResults[0].stats.commented}</div>
+                      </article>
+                      <article
+                        className="stat-card stat-push-commits"
+                        title="Число событий push за период (каждое событие = 1). Пуши с «Merge branch» в заголовке коммита не учитываются."
+                      >
+                        <div className="stat-label">Коммитов (push)</div>
+                        <div className="stat-value">{flatPeriodResults[0].stats.pushCommits}</div>
                       </article>
                       <article
                         className="stat-card stat-ratio"
@@ -1677,7 +1718,7 @@ export default function App() {
                 <p className="day-detail-hint">
                   Список событий за день учитывает видимые на графике серии (легенда под графиком): скрытые типы не
                   показываются. Ссылки ведут в GitLab. Размер MR (строки и/или файлы) — из ответов API при загрузке
-                  периода.
+                  периода; каждое событие push в списке соответствует одному учётному «коммиту» в графике.
                 </p>
                 {detailItemsFiltered.length === 0 ? (
                   <p className="day-detail-empty">

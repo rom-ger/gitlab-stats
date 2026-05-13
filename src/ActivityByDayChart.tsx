@@ -5,6 +5,8 @@ export type ActivitySeriesPoint = {
   day: string
   approved: number
   commented: number
+  /** Одно событие push в GitLab = 1 в этом ряду; без пушей с заголовком «Merge branch …». */
+  pushCommits: number
   /** Число MR, созданных в этот день (для подсказки и детализации). */
   mrsCreated: number
   /** Сумма строк диффа (добавления+удаления) по MR, созданным в этот день — отдельная шкала Y. */
@@ -14,6 +16,7 @@ export type ActivitySeriesPoint = {
 const COLORS = {
   approved: '#fca326',
   commented: '#8b7fd6',
+  pushCommits: '#17a689',
   mrsCreated: '#2da44e',
 } as const
 
@@ -23,18 +26,20 @@ export const ACTIVITY_SERIES_DEFAULT_VISIBILITY: Record<ActivitySeriesKey, boole
   mrsCreated: true,
   approved: true,
   commented: true,
+  pushCommits: true,
 }
 
 type SeriesKey = ActivitySeriesKey
 
-const SERIES_ORDER: SeriesKey[] = ['mrsCreated', 'approved', 'commented']
+const SERIES_ORDER: SeriesKey[] = ['mrsCreated', 'approved', 'commented', 'pushCommits']
 
-const SERIES_ORDER_NO_MR: SeriesKey[] = ['approved', 'commented']
+const SERIES_ORDER_NO_MR: SeriesKey[] = ['approved', 'commented', 'pushCommits']
 
 const SERIES_LABEL: Record<SeriesKey, string> = {
   mrsCreated: 'Созд. MR — строки диффа',
   approved: 'Одобрение MR',
   commented: 'Комментарий в чужом MR',
+  pushCommits: 'Коммиты (push)',
 }
 
 function maxLeftAxis(points: ActivitySeriesPoint[], visibility: Record<SeriesKey, boolean>): number {
@@ -42,6 +47,7 @@ function maxLeftAxis(points: ActivitySeriesPoint[], visibility: Record<SeriesKey
   for (const p of points) {
     if (visibility.approved) m = Math.max(m, p.approved)
     if (visibility.commented) m = Math.max(m, p.commented)
+    if (visibility.pushCommits) m = Math.max(m, p.pushCommits)
   }
   return m
 }
@@ -145,7 +151,7 @@ export function ActivityByDayChart({
 
   const seriesOrder = showMrsCreatedSeries ? SERIES_ORDER : SERIES_ORDER_NO_MR
 
-  const visibilityLayoutKey = `${visibility.approved ? 1 : 0}${visibility.commented ? 1 : 0}${visibility.mrsCreated ? 1 : 0}`
+  const visibilityLayoutKey = `${visibility.approved ? 1 : 0}${visibility.commented ? 1 : 0}${visibility.pushCommits ? 1 : 0}${visibility.mrsCreated ? 1 : 0}`
 
   useLayoutEffect(() => {
     const el = scrollRef.current
@@ -163,7 +169,7 @@ export function ActivityByDayChart({
   if (points.length === 0) return null
 
   const H = 260
-  const showLeft = visibility.approved || visibility.commented
+  const showLeft = visibility.approved || visibility.commented || visibility.pushCommits
   const showRight = visibility.mrsCreated
   const padL = showLeft ? 40 : 26
   const padR = showRight ? 44 : 12
@@ -438,7 +444,9 @@ export function ActivityByDayChart({
               title={
                 key === 'mrsCreated'
                   ? 'Столбцы по правой шкале: сумма строк диффа в MR за день (только target_branch develop или dev). Число MR — в подсказке.'
-                  : undefined
+                  : key === 'pushCommits'
+                    ? 'Число событий pushed за день (каждое событие = 1). Пуши с «Merge branch» в push_data.commit_title не входят.'
+                    : undefined
               }
               onClick={() => toggleSeries(key)}
             >
@@ -450,7 +458,7 @@ export function ActivityByDayChart({
       </ul>
       {showLeft && showRight ? (
         <p className="activity-chart-axis-note" aria-hidden>
-          Левая шкала — одобрения и комментарии (шт.), правая — строки диффа в созданных MR.
+          Левая шкала — одобрения, комментарии и коммиты из push (шт.), правая — строки диффа в созданных MR.
           {rightAxisClipped
             ? ' На длинных периодах правая шкала без редких выбросов: столбец до верха — значение выше подписи; точное число в подсказке.'
             : ''}{' '}
