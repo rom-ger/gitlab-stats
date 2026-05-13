@@ -20,6 +20,7 @@ import {
 } from './formPersistence'
 import {
   ActivityByDayChart,
+  ActivitySeriesLegend,
   ACTIVITY_SERIES_DEFAULT_VISIBILITY,
   type ActivitySeriesKey,
   type ActivitySeriesPoint,
@@ -490,12 +491,10 @@ export default function App() {
   const [compareUserCount, setCompareUserCount] = useState(0)
   const [comparePeriodCount, setComparePeriodCount] = useState(0)
   const [userBundles, setUserBundles] = useState<UserResultsBundle[] | null>(null)
-  const [detailDay, setDetailDay] = useState<string | null>(null)
-  const [detailChartKey, setDetailChartKey] = useState<string | null>(null)
-  const [detailItems, setDetailItems] = useState<DayDetailItem[]>([])
-  const [chartVisibilityByChartKey, setChartVisibilityByChartKey] = useState<
-    Record<string, Record<ActivitySeriesKey, boolean>>
-  >({})
+  const [selectedDayByChartKey, setSelectedDayByChartKey] = useState<Record<string, string>>({})
+  const [chartVisibilityOverride, setChartVisibilityOverride] = useState<
+    Record<ActivitySeriesKey, boolean> | undefined
+  >(undefined)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [compareTableSort, setCompareTableSort] = useState<CompareTableSort | null>(null)
   const [medianMrModal, setMedianMrModal] = useState<{
@@ -505,6 +504,11 @@ export default function App() {
   } | null>(null)
 
   const primaryStartDate = periodRows[0]?.startDate?.trim() ?? ''
+
+  const sharedChartVisibility = useMemo(
+    () => activityChartVisibility(chartVisibilityOverride),
+    [chartVisibilityOverride],
+  )
 
   const flatPeriodResults = useMemo((): PeriodResult[] => {
     if (!userBundles?.length) return []
@@ -881,10 +885,8 @@ export default function App() {
   async function loadStats() {
     setError(null)
     setUserBundles(null)
-    setDetailDay(null)
-    setDetailChartKey(null)
-    setDetailItems([])
-    setChartVisibilityByChartKey({})
+    setSelectedDayByChartKey({})
+    setChartVisibilityOverride(undefined)
     setResolvedName(null)
     setCompareUserCount(0)
     setComparePeriodCount(0)
@@ -1037,17 +1039,39 @@ export default function App() {
     await loadStats()
   }
 
-  function closeDayDetail() {
-    setDetailDay(null)
-    setDetailChartKey(null)
-    setDetailItems([])
+  function closeDayDetail(chartKey: string) {
+    setSelectedDayByChartKey((m) => {
+      if (!(chartKey in m)) return m
+      const next = { ...m }
+      delete next[chartKey]
+      return next
+    })
   }
 
   function openDayDetail(day: string, chartKey: string) {
-    const pr = flatPeriodResults.find((p) => p.chartKey === chartKey)
-    setDetailDay(day)
-    setDetailChartKey(chartKey)
-    setDetailItems(pr?.detailByDay[day] ?? [])
+    setSelectedDayByChartKey((m) => {
+      if (m[chartKey] === day) {
+        const next = { ...m }
+        delete next[chartKey]
+        return next
+      }
+      return { ...m, [chartKey]: day }
+    })
+  }
+
+  function filterDayDetailItems(
+    pr: PeriodResult,
+    day: string | null,
+    vis: Record<ActivitySeriesKey, boolean>,
+  ): DayDetailItem[] {
+    if (!day) return []
+    const items = pr.detailByDay[day] ?? []
+    return items.filter((item) => {
+      if (item.kind === 'approved') return vis.approved
+      if (item.kind === 'commented') return vis.commented
+      if (item.kind === 'push_commits') return vis.pushCommits
+      return vis.mrsCreated
+    })
   }
 
   function userRowTitle(index: number): string {
@@ -1119,22 +1143,6 @@ export default function App() {
     periodRows,
     primaryStartDate,
   ])
-
-  const detailContextPeriod =
-    detailChartKey && flatPeriodResults.length > 0
-      ? flatPeriodResults.find((p) => p.chartKey === detailChartKey)
-      : undefined
-
-  const detailItemsFiltered = useMemo(() => {
-    if (!detailChartKey) return detailItems
-    const vis = activityChartVisibility(chartVisibilityByChartKey[detailChartKey])
-    return detailItems.filter((item) => {
-      if (item.kind === 'approved') return vis.approved
-      if (item.kind === 'commented') return vis.commented
-      if (item.kind === 'push_commits') return vis.pushCommits
-      return vis.mrsCreated
-    })
-  }, [detailItems, detailChartKey, chartVisibilityByChartKey, SHOW_CREATION_METRICS_AND_EFFECTIVENESS])
 
   const showCompareUserColumn = compareUserCount > 1 && comparePeriodCount === 1
   const showComparePeriodColumn = comparePeriodCount > 1 && compareUserCount === 1
@@ -1658,21 +1666,33 @@ export default function App() {
                 <>
                   По дням (часовой пояс браузера): одобрения и комментарии в MR — левая шкала (количество событий);
                   созданные вами MR <strong>в develop или dev</strong> — <strong>правая шкала</strong> (сумма строк диффа
-                  в MR за день; число MR — во всплывающей подсказке).
+                  в MR за день; число MR — во всплывающей подсказке). Серии включаются и выключаются{' '}
+                  <strong>одной легендой над графиками</strong> для всех рядов сразу.
                 </>
               ) : (
                 <>
-                  По дням (часовой пояс браузера): столбцы — число <strong>одобрений</strong> и число{' '}
-                  <strong>комментариев</strong> в чужих MR (одна шкала Y, события за день).
+                  По дням (часовой пояс браузера): столбцы — число <strong>одобрений</strong>, число{' '}
+                  <strong>комментариев</strong> в чужих MR и <strong>коммитов (push)</strong> (одна шкала Y, события за
+                  день). Серии — <strong>общая легенда над графиками</strong> (действует на все графики и детализацию
+                  по дню).
                 </>
               )}
               {flatPeriodResults.length > 1
                 ? compareUserCount > 1
-                  ? ' Ниже — график для каждого сотрудника за один и тот же период; клик по дню откроет детали выбранного графика.'
-                  : ' Ниже — график для каждого периода; клик по дню откроет детали выбранного графика.'
+                  ? ' Ниже — график для каждого сотрудника за один и тот же период; клик по дню открывает детали под этим графиком (список свой у каждого графика).'
+                  : ' Ниже — график для каждого периода; клик по дню открывает детали под соответствующим графиком.'
                 : ''}
             </p>
-            {flatPeriodResults.map((pr) => (
+            <ActivitySeriesLegend
+              visibility={sharedChartVisibility}
+              onVisibilityChange={setChartVisibilityOverride}
+              showMrsCreatedSeries={SHOW_CREATION_METRICS_AND_EFFECTIVENESS}
+            />
+            {flatPeriodResults.map((pr) => {
+              const daySel = selectedDayByChartKey[pr.chartKey] ?? null
+              const itemsRaw = daySel ? (pr.detailByDay[daySel] ?? []) : []
+              const filteredItems = filterDayDetailItems(pr, daySel, sharedChartVisibility)
+              return (
               <div key={pr.chartKey} className="chart-period-block">
                 {flatPeriodResults.length > 1 ? (
                   <h3 className="chart-period-title">
@@ -1681,90 +1701,88 @@ export default function App() {
                 ) : null}
                 <ActivityByDayChart
                   points={pr.activityByDay}
-                  selectedDay={detailChartKey === pr.chartKey ? detailDay : null}
+                  selectedDay={daySel}
                   onDayClick={
                     pr.activityByDay.length > 0 ? (day) => openDayDetail(day, pr.chartKey) : undefined
                   }
-                  visibility={activityChartVisibility(chartVisibilityByChartKey[pr.chartKey])}
+                  visibility={sharedChartVisibility}
+                  showLegend={false}
                   showMrsCreatedSeries={SHOW_CREATION_METRICS_AND_EFFECTIVENESS}
-                  onVisibilityChange={(next) =>
-                    setChartVisibilityByChartKey((m) => ({ ...m, [pr.chartKey]: next }))
-                  }
                 />
-              </div>
-            ))}
 
-            {detailDay && detailChartKey ? (
-              <div className="day-detail">
-                <div className="day-detail-head">
-                  <h3 className="day-detail-title">
-                    {formatDayRu(detailDay)}
-                    {detailContextPeriod ? (
-                      <span className="day-detail-period">
-                        {' · '}
-                        {compareUserCount > 1 ? (
-                          <>
-                            {detailContextPeriod.userDisplayName} ({detailContextPeriod.userLogin}) ·{' '}
-                          </>
-                        ) : null}
-                        {formatPeriodRangeShort(detailContextPeriod)}
-                      </span>
-                    ) : null}
-                  </h3>
-                  <button type="button" className="day-detail-close" onClick={closeDayDetail}>
-                    Закрыть
-                  </button>
-                </div>
-                <p className="day-detail-hint">
-                  Список событий за день учитывает видимые на графике серии (легенда под графиком): скрытые типы не
-                  показываются. Ссылки ведут в GitLab. Размер MR (строки и/или файлы) — из ответов API при загрузке
-                  периода; каждое событие push в списке соответствует одному учётному «коммиту» в графике.
-                </p>
-                {detailItemsFiltered.length === 0 ? (
-                  <p className="day-detail-empty">
-                    {detailItems.length === 0
-                      ? 'За этот день событий не найдено.'
-                      : 'Нет событий выбранных типов — включите серии в легенде графика.'}
-                  </p>
-                ) : (
-                  <ul className="day-detail-list">
-                    {detailItemsFiltered.map((item) => {
-                      const sizeBadge = dayDetailMrSizeBadge(item)
-                      return (
-                      <li key={item.id} className="day-detail-item">
-                        <span className="day-detail-time">{formatEventTime(item.createdAt)}</span>
-                        <div className="day-detail-body">
-                          <div className="day-detail-line">
-                            <span className={dayDetailKindClass(item.kind)}>{dayDetailKindLabel(item.kind)}</span>
-                            {item.webUrl ? (
-                              <a
-                                className="day-detail-link"
-                                href={item.webUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                              >
-                                {item.title}
-                              </a>
-                            ) : (
-                              <span className="day-detail-text">{item.title}</span>
-                            )}
-                            {sizeBadge ? (
-                              <span className="day-detail-mr-size" title={sizeBadge.title}>
-                                {sizeBadge.text}
-                              </span>
-                            ) : null}
-                          </div>
-                          {item.kind === 'commented' && item.commentBody ? (
-                            <div className="day-detail-comment">{item.commentBody}</div>
+                {daySel ? (
+                  <div className="day-detail">
+                    <div className="day-detail-head">
+                      <h3 className="day-detail-title">
+                        {formatDayRu(daySel)}
+                        <span className="day-detail-period">
+                          {' · '}
+                          {compareUserCount > 1 ? (
+                            <>
+                              {pr.userDisplayName} ({pr.userLogin}) ·{' '}
+                            </>
                           ) : null}
-                        </div>
-                      </li>
-                      )
-                    })}
-                  </ul>
-                )}
+                          {formatPeriodRangeShort(pr)}
+                        </span>
+                      </h3>
+                      <button type="button" className="day-detail-close" onClick={() => closeDayDetail(pr.chartKey)}>
+                        Закрыть
+                      </button>
+                    </div>
+                    <p className="day-detail-hint">
+                      Список событий за день учитывает видимые серии из общей легенды над графиками: скрытые типы не
+                      показываются. Ссылки ведут в GitLab. Размер MR (строки и/или файлы) — из ответов API при загрузке
+                      периода; каждое событие push в списке соответствует одному учётному «коммиту» в графике.
+                      Повторный клик по тому же дню на графике скрывает детали.
+                    </p>
+                    {filteredItems.length === 0 ? (
+                      <p className="day-detail-empty">
+                        {itemsRaw.length === 0
+                          ? 'За этот день событий не найдено.'
+                          : 'Нет событий выбранных типов — включите серии в легенде графика.'}
+                      </p>
+                    ) : (
+                      <ul className="day-detail-list">
+                        {filteredItems.map((item) => {
+                          const sizeBadge = dayDetailMrSizeBadge(item)
+                          return (
+                          <li key={item.id} className="day-detail-item">
+                            <span className="day-detail-time">{formatEventTime(item.createdAt)}</span>
+                            <div className="day-detail-body">
+                              <div className="day-detail-line">
+                                <span className={dayDetailKindClass(item.kind)}>{dayDetailKindLabel(item.kind)}</span>
+                                {item.webUrl ? (
+                                  <a
+                                    className="day-detail-link"
+                                    href={item.webUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                  >
+                                    {item.title}
+                                  </a>
+                                ) : (
+                                  <span className="day-detail-text">{item.title}</span>
+                                )}
+                                {sizeBadge ? (
+                                  <span className="day-detail-mr-size" title={sizeBadge.title}>
+                                    {sizeBadge.text}
+                                  </span>
+                                ) : null}
+                              </div>
+                              {item.kind === 'commented' && item.commentBody ? (
+                                <div className="day-detail-comment">{item.commentBody}</div>
+                              ) : null}
+                            </div>
+                          </li>
+                          )
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                ) : null}
               </div>
-            ) : null}
+              )
+            })}
           </section>
         ) : null}
         {medianMrModal ? (

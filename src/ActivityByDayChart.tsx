@@ -115,22 +115,83 @@ function tooltipPosition(clientX: number, clientY: number, rowCount: number): { 
   return { left, top }
 }
 
+/** Общая легенда серий для всех графиков активности на странице. */
+export function ActivitySeriesLegend({
+  visibility: visibilityRaw,
+  onVisibilityChange,
+  showMrsCreatedSeries = true,
+}: {
+  visibility: Record<ActivitySeriesKey, boolean>
+  onVisibilityChange: (next: Record<ActivitySeriesKey, boolean>) => void
+  showMrsCreatedSeries?: boolean
+}) {
+  const seriesOrder = showMrsCreatedSeries ? SERIES_ORDER : SERIES_ORDER_NO_MR
+  const visibility: Record<SeriesKey, boolean> = showMrsCreatedSeries
+    ? visibilityRaw
+    : { ...visibilityRaw, mrsCreated: false }
+
+  function toggleSeries(key: SeriesKey) {
+    if (!showMrsCreatedSeries && key === 'mrsCreated') return
+    const apply = (prev: Record<SeriesKey, boolean>) => {
+      const on = seriesOrder.filter((k) => prev[k]).length
+      if (prev[key] && on <= 1) return prev
+      const next = { ...prev, [key]: !prev[key] }
+      if (!showMrsCreatedSeries) next.mrsCreated = false
+      return next
+    }
+    onVisibilityChange(apply(visibilityRaw))
+  }
+
+  return (
+    <div className="activity-chart activity-chart--legend-only">
+      <ul className="activity-chart-legend" aria-label="Серии на графиках — нажмите, чтобы скрыть или показать">
+        {seriesOrder.map((key) => (
+          <li key={key}>
+            <button
+              type="button"
+              className={`activity-chart-legend-btn${visibility[key] ? '' : ' activity-chart-legend-btn--off'}`}
+              aria-pressed={visibility[key]}
+              title={
+                key === 'mrsCreated'
+                  ? 'Столбцы по правой шкале: сумма строк диффа в MR за день (только target_branch develop или dev). Число MR — в подсказке.'
+                  : key === 'pushCommits'
+                    ? 'Число событий pushed за день (каждое событие = 1). Пуши с «Merge branch» в push_data.commit_title не входят.'
+                    : undefined
+              }
+              onClick={() => toggleSeries(key)}
+            >
+              <span className="activity-chart-swatch" style={{ background: COLORS[key] }} aria-hidden />
+              {SERIES_LABEL[key]}
+            </button>
+          </li>
+        ))}
+      </ul>
+      <p className="activity-chart-global-legend-hint" aria-hidden>
+        Настройки серий действуют на все графики ниже и на подробные списки по дню.
+      </p>
+    </div>
+  )
+}
+
 export function ActivityByDayChart({
   points,
   selectedDay = null,
   onDayClick,
-  visibility: visibilityControlled,
+  visibility: visibilityFromParent,
   onVisibilityChange,
   /** Ложь — не рисуем серию «созд. MR», правую ось Y и пункт легенды (только одобрения и комментарии). */
   showMrsCreatedSeries = true,
+  /** Ложь — легенда не рисуется (например, общая легенда над блоком графиков). */
+  showLegend = true,
 }: {
   points: ActivitySeriesPoint[]
   selectedDay?: string | null
   onDayClick?: (day: string) => void
-  /** Если задано вместе с onVisibilityChange — контролируемая легенда (фильтр серий). */
+  /** Если задано — отрисовка столбцов по этим флажкам (часто общие для нескольких графиков). */
   visibility?: Record<SeriesKey, boolean>
   onVisibilityChange?: (next: Record<SeriesKey, boolean>) => void
   showMrsCreatedSeries?: boolean
+  showLegend?: boolean
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [scrollViewportWidth, setScrollViewportWidth] = useState(0)
@@ -143,11 +204,11 @@ export function ActivityByDayChart({
   const [visibilityInternal, setVisibilityInternal] = useState<Record<SeriesKey, boolean>>(
     ACTIVITY_SERIES_DEFAULT_VISIBILITY,
   )
-  const isControlled = visibilityControlled != null && onVisibilityChange != null
-  const visibilityRaw = isControlled ? visibilityControlled : visibilityInternal
+  const usesParentVisibility = visibilityFromParent != null
+  const visibilityBase = usesParentVisibility ? visibilityFromParent! : visibilityInternal
   const visibility: Record<SeriesKey, boolean> = showMrsCreatedSeries
-    ? visibilityRaw
-    : { ...visibilityRaw, mrsCreated: false }
+    ? visibilityBase
+    : { ...visibilityBase, mrsCreated: false }
 
   const seriesOrder = showMrsCreatedSeries ? SERIES_ORDER : SERIES_ORDER_NO_MR
 
@@ -232,10 +293,10 @@ export function ActivityByDayChart({
       if (!showMrsCreatedSeries) next.mrsCreated = false
       return next
     }
-    if (isControlled) {
-      onVisibilityChange!(apply(visibilityControlled))
+    if (onVisibilityChange) {
+      onVisibilityChange(apply(usesParentVisibility ? visibilityFromParent! : visibilityInternal))
     } else {
-      setVisibilityInternal(apply)
+      setVisibilityInternal((prev) => apply(prev))
     }
   }
 
@@ -434,6 +495,7 @@ export function ActivityByDayChart({
         </div>
       ) : null}
 
+      {showLegend ? (
       <ul className="activity-chart-legend" aria-label="Серии на графике — нажмите, чтобы скрыть или показать">
         {seriesOrder.map((key) => (
           <li key={key}>
@@ -456,6 +518,7 @@ export function ActivityByDayChart({
           </li>
         ))}
       </ul>
+      ) : null}
       {showLeft && showRight ? (
         <p className="activity-chart-axis-note" aria-hidden>
           Левая шкала — одобрения, комментарии и коммиты из push (шт.), правая — строки диффа в созданных MR.
