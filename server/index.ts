@@ -48,6 +48,10 @@ const MR_DIFF_FALLBACK_CHUNK = 18
 const MAX_LIST_PAGES = 400
 /** Пагинация GET /users — верхняя граница страниц (100 пользователей на страницу). */
 const MAX_USER_LIST_PAGES = 200
+/** Пагинация GET /groups — верхняя граница страниц. */
+const MAX_GROUP_LIST_PAGES = 200
+/** Пагинация GET /groups/:id/members. */
+const MAX_GROUP_MEMBER_PAGES = 200
 
 /**
  * Учитываются только MR автора с target_branch из списка (merge в develop или в dev).
@@ -1634,6 +1638,135 @@ app.post('/api/list-users', async (req, res) => {
 
   out.sort((a, b) => a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }))
   res.json({ users: out, count: out.length })
+})
+
+app.post('/api/list-groups', async (req, res) => {
+  const gitlabUrl = req.body?.gitlabUrl as string | undefined
+  const token = req.body?.token as string | undefined
+
+  if (!gitlabUrl?.trim() || !token?.trim()) {
+    res.status(400).json({ error: 'Укажите URL GitLab и токен.' })
+    return
+  }
+
+  const base = normalizeBaseUrl(gitlabUrl)
+  const out: { id: number; full_path: string; name: string }[] = []
+  const seenId = new Set<number>()
+
+  for (let page = 1; page <= MAX_GROUP_LIST_PAGES; page++) {
+    const p = new URLSearchParams({
+      per_page: String(PER_PAGE),
+      page: String(page),
+    })
+    const url = `${base}/api/v4/groups?${p}`
+    let r: Response
+    try {
+      r = await gitlabFetch(url, token.trim(), 'GET')
+    } catch {
+      res.status(502).json({ error: 'Не удалось подключиться к GitLab.' })
+      return
+    }
+    if (!r.ok) {
+      const text = await r.text()
+      res.status(r.status >= 400 && r.status < 600 ? r.status : 502).json({
+        error: `GitLab ответил ${r.status}. ${text.slice(0, 400)}`,
+      })
+      return
+    }
+    let chunk: unknown
+    try {
+      chunk = await r.json()
+    } catch {
+      res.status(502).json({ error: 'Не удалось разобрать ответ GitLab.' })
+      return
+    }
+    if (!Array.isArray(chunk)) {
+      res.status(502).json({ error: 'Неожиданный ответ GitLab (ожидался массив групп).' })
+      return
+    }
+    for (const row of chunk) {
+      if (!row || typeof row !== 'object') continue
+      const o = row as Record<string, unknown>
+      const id = asPositiveInt(o.id)
+      if (id == null || seenId.has(id)) continue
+      const fullPath = typeof o.full_path === 'string' ? o.full_path.trim() : ''
+      const name = typeof o.name === 'string' ? o.name.trim() : ''
+      if (!fullPath) continue
+      seenId.add(id)
+      out.push({ id, full_path: fullPath, name: name || fullPath })
+    }
+    if (chunk.length < PER_PAGE) break
+  }
+
+  out.sort((a, b) => a.full_path.localeCompare(b.full_path, 'ru', { sensitivity: 'base' }))
+  res.json({ groups: out, count: out.length })
+})
+
+app.post('/api/group-members', async (req, res) => {
+  const gitlabUrl = req.body?.gitlabUrl as string | undefined
+  const token = req.body?.token as string | undefined
+  const groupId = req.body?.groupId as number | undefined
+
+  if (!gitlabUrl?.trim() || !token?.trim()) {
+    res.status(400).json({ error: 'Укажите URL GitLab и токен.' })
+    return
+  }
+  const gid = typeof groupId === 'number' && Number.isFinite(groupId) && groupId > 0 ? Math.trunc(groupId) : null
+  if (gid == null) {
+    res.status(400).json({ error: 'Укажите числовой id группы.' })
+    return
+  }
+
+  const base = normalizeBaseUrl(gitlabUrl)
+  const out: { username: string; name: string }[] = []
+  const seen = new Set<string>()
+
+  for (let page = 1; page <= MAX_GROUP_MEMBER_PAGES; page++) {
+    const p = new URLSearchParams({
+      per_page: String(PER_PAGE),
+      page: String(page),
+    })
+    const url = `${base}/api/v4/groups/${gid}/members?${p}`
+    let r: Response
+    try {
+      r = await gitlabFetch(url, token.trim(), 'GET')
+    } catch {
+      res.status(502).json({ error: 'Не удалось подключиться к GitLab.' })
+      return
+    }
+    if (!r.ok) {
+      const text = await r.text()
+      res.status(r.status >= 400 && r.status < 600 ? r.status : 502).json({
+        error: `GitLab ответил ${r.status}. ${text.slice(0, 400)}`,
+      })
+      return
+    }
+    let chunk: unknown
+    try {
+      chunk = await r.json()
+    } catch {
+      res.status(502).json({ error: 'Не удалось разобрать ответ GitLab.' })
+      return
+    }
+    if (!Array.isArray(chunk)) {
+      res.status(502).json({ error: 'Неожиданный ответ GitLab (ожидался массив участников).' })
+      return
+    }
+    for (const row of chunk) {
+      if (!row || typeof row !== 'object') continue
+      const o = row as Record<string, unknown>
+      const username = typeof o.username === 'string' ? o.username.trim() : ''
+      if (!username || seen.has(username)) continue
+      seen.add(username)
+      const rawName = typeof o.name === 'string' ? o.name.trim() : ''
+      const name = rawName || username
+      out.push({ username, name })
+    }
+    if (chunk.length < PER_PAGE) break
+  }
+
+  out.sort((a, b) => a.name.localeCompare(b.name, 'ru', { sensitivity: 'base' }))
+  res.json({ members: out, count: out.length })
 })
 
 app.post('/api/events-total', async (req, res) => {

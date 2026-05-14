@@ -291,6 +291,18 @@ type UserResultsBundle = {
   periods: PeriodResult[]
 }
 
+function activityEventSumForPeriod(pr: PeriodResult): number {
+  let s = 0
+  for (const p of pr.activityByDay) {
+    s += p.approved + p.commented + p.pushCommits + p.mrsCreated
+  }
+  return s
+}
+
+function userBundleHasAnyActivity(bundle: UserResultsBundle): boolean {
+  return bundle.periods.some((pr) => activityEventSumForPeriod(pr) > 0)
+}
+
 type DayDetailItem = {
   id: string
   kind: 'approved' | 'commented' | 'mr_created' | 'push_commits'
@@ -481,6 +493,19 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return data
 }
 
+function userRowsFromGroupMembers(members: { username: string; name: string }[]): PersistedCompareUser[] {
+  const seen = new Set<string>()
+  const out: PersistedCompareUser[] = []
+  for (const m of members) {
+    const username = typeof m.username === 'string' ? m.username.trim() : ''
+    const key = username.toLowerCase()
+    if (!username || seen.has(key)) continue
+    seen.add(key)
+    out.push({ ...createEmptyCompareUserRow(), username, userEntryMode: 'list' })
+  }
+  return out
+}
+
 export default function App() {
   const [gitlabUrl, setGitlabUrl] = useState(initialForm.gitlabUrl)
   const [token, setToken] = useState(initialForm.token)
@@ -490,6 +515,14 @@ export default function App() {
   const [usersListLoading, setUsersListLoading] = useState(false)
   const [usersListHint, setUsersListHint] = useState<string | null>(null)
   const [usersListError, setUsersListError] = useState<string | null>(null)
+  const [fetchedGroups, setFetchedGroups] = useState<
+    { id: number; full_path: string; name: string }[] | null
+  >(null)
+  const [groupsListLoading, setGroupsListLoading] = useState(false)
+  const [groupsListError, setGroupsListError] = useState<string | null>(null)
+  const [groupsListHint, setGroupsListHint] = useState<string | null>(null)
+  const [selectedGroupId, setSelectedGroupId] = useState('')
+  const [groupMembersLoading, setGroupMembersLoading] = useState(false)
   const [userPickerOpen, setUserPickerOpen] = useState(false)
   const [userSearchQuery, setUserSearchQuery] = useState('')
   const [userListHighlight, setUserListHighlight] = useState(0)
@@ -952,21 +985,33 @@ export default function App() {
 
     setLoading(true)
     try {
-      const resolvedList = await Promise.all(
-        activeUserRows.map((u) =>
-          postJson<{ id: number; username: string }>('/api/resolve-user', {
-            gitlabUrl,
-            token,
-            username: u.username.trim(),
-          }),
-        ),
+      const resolveResults = await Promise.all(
+        activeUserRows.map(async (uRow) => {
+          const login = uRow.username.trim()
+          try {
+            const resolved = await postJson<{ id: number; username: string }>('/api/resolve-user', {
+              gitlabUrl,
+              token,
+              username: login,
+            })
+            return { ok: true as const, uRow, resolved }
+          } catch {
+            return { ok: false as const, login }
+          }
+        }),
       )
 
-      const multiUser = activeUserRows.length > 1
+      const resolvedPairs = resolveResults.filter((r) => r.ok)
+
+      if (resolvedPairs.length === 0) {
+        setError('Не удалось найти в GitLab ни одного из указанных пользователей — нечего показать.')
+        return
+      }
+
+      const multiUser = resolvedPairs.length > 1
 
       const bundles = await Promise.all(
-        activeUserRows.map(async (uRow, ui) => {
-          const resolved = resolvedList[ui]!
+        resolvedPairs.map(async ({ uRow, resolved }) => {
           const displayName = resolveUserDisplayName(resolved.username) ?? resolved.username
           const periods = await Promise.all(
             activeRows.map((row, i) => {
@@ -991,10 +1036,20 @@ export default function App() {
         }),
       )
 
-      setUserBundles(bundles)
-      setCompareUserCount(activeUserRows.length)
+      const bundlesWithActivity = bundles.filter(userBundleHasAnyActivity)
+      if (bundlesWithActivity.length === 0) {
+        setError(
+          'За выбранный период у указанных сотрудников нет учитываемой активности в GitLab (одобрения, комментарии, пуши, MR) — нечего показать.',
+        )
+        return
+      }
+
+      setUserBundles(bundlesWithActivity)
+      setCompareUserCount(bundlesWithActivity.length)
       setComparePeriodCount(activeRows.length)
-      setResolvedName(activeUserRows.length === 1 ? resolvedList[0].username : null)
+      setResolvedName(
+        bundlesWithActivity.length === 1 ? bundlesWithActivity[0].resolvedUsername : null,
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Неизвестная ошибка.')
     } finally {
@@ -1034,6 +1089,86 @@ export default function App() {
       setUsersListError(err instanceof Error ? err.message : 'Не удалось загрузить список')
     } finally {
       setUsersListLoading(false)
+    }
+  }
+
+  async function handleLoadGroupList() {
+    setGroupsListError(null)
+    setGroupsListHint(null)
+    if (!gitlabUrl.trim() || !token.trim()) {
+      setGroupsListError('Сначала укажите адрес GitLab и токен.')
+      return
+    }
+    setGroupsListLoading(true)
+    try {
+      const data = await postJson<{ groups: { id: number; full_path: string; name: string }[]; count: number }>(
+        '/api/list-groups',
+        { gitlabUrl, token },
+      )
+      setFetchedGroups(data.groups)
+      setSelectedGroupId('')
+      setGroupsListHint(
+        data.count > 0
+          ? `Загружено групп: ${data.count}. Выберите группу и нажмите «Подставить участников».`
+          : 'Список пуст — у токена нет доступа к группам или их нет.',
+      )
+    } catch (err) {
+      setGroupsListError(err instanceof Error ? err.message : 'Не удалось загрузить группы')
+    } finally {
+      setGroupsListLoading(false)
+    }
+  }
+
+  async function handleApplyGroupMembers() {
+    setGroupsListError(null)
+    if (!gitlabUrl.trim() || !token.trim()) {
+      setGroupsListError('Сначала укажите адрес GitLab и токен.')
+      return
+    }
+    const gid = Number.parseInt(selectedGroupId, 10)
+    if (!Number.isFinite(gid) || gid <= 0) {
+      setGroupsListError('Выберите группу из списка.')
+      return
+    }
+    setGroupMembersLoading(true)
+    try {
+      const data = await postJson<{ members: { username: string; name: string }[]; count: number }>(
+        '/api/group-members',
+        { gitlabUrl, token, groupId: gid },
+      )
+      if (data.count === 0) {
+        setGroupsListHint('В выбранной группе не найдено участников с логином (прямые члены группы).')
+        return
+      }
+      const rows = userRowsFromGroupMembers(data.members)
+      if (rows.length === 0) {
+        setGroupsListHint(
+          'В ответе GitLab не оказалось участников с непустым логином — список сотрудников не изменён.',
+        )
+        return
+      }
+      setUserRows(rows)
+      if (rows.length > 1) {
+        setPeriodRows((p) => (p.length <= 1 ? p : [p[0]]))
+      }
+      setFetchedUserList((prev) => {
+        const m = new Map<string, { username: string; name: string }>()
+        for (const u of TEAM_USERS) m.set(u.username, { username: u.username, name: u.name })
+        if (prev) {
+          for (const u of prev) m.set(u.username, u)
+        }
+        for (const mem of data.members) {
+          m.set(mem.username, { username: mem.username, name: mem.name })
+        }
+        return [...m.values()].sort((a, b) =>
+          (a.name || a.username).localeCompare(b.name || b.username, 'ru', { sensitivity: 'base' }),
+        )
+      })
+      setGroupsListHint(`Список сотрудников заменён: ${rows.length} участников группы (без дублей по логину).`)
+    } catch (err) {
+      setGroupsListError(err instanceof Error ? err.message : 'Не удалось загрузить участников группы')
+    } finally {
+      setGroupMembersLoading(false)
     }
   }
 
@@ -1722,6 +1857,7 @@ export default function App() {
               visibility={sharedChartVisibility}
               onVisibilityChange={setChartVisibilityOverride}
               showMrsCreatedSeries={SHOW_CREATION_METRICS_AND_EFFECTIVENESS}
+              sticky
             />
             {flatPeriodResults.map((pr) => {
               const daySel = selectedDayByChartKey[pr.chartKey] ?? null
@@ -2174,6 +2310,60 @@ export default function App() {
                 <button type="button" className="btn-inline add-period-btn" onClick={addCompareUserRow}>
                   + Добавить сотрудника для сравнения
                 </button>
+                <div className="group-pick-panel" aria-label="Подстановка сотрудников из группы GitLab">
+                  <p className="group-pick-title">Дополнительно: из группы GitLab</p>
+                  <p className="hint group-pick-lead">
+                    Загрузите группы, доступные токену, выберите одну и нажмите «Подставить участников» — список
+                    сотрудников выше будет целиком заменён прямыми участниками этой группы (дубликаты логинов из ответа
+                    GitLab убираются). При нескольких сотрудниках лишние периоды сбрасываются к основному (как при кнопке
+                    «+ Добавить сотрудника»).
+                  </p>
+                  <div className="group-pick-toolbar">
+                    <button
+                      type="button"
+                      className="btn-inline"
+                      disabled={groupsListLoading || !gitlabUrl.trim() || !token.trim()}
+                      onClick={() => void handleLoadGroupList()}
+                    >
+                      {groupsListLoading ? 'Загрузка…' : 'Загрузить группы'}
+                    </button>
+                    <select
+                      className="group-pick-select"
+                      aria-label="Группа GitLab"
+                      value={selectedGroupId}
+                      onChange={(e) => setSelectedGroupId(e.target.value)}
+                      disabled={!fetchedGroups?.length}
+                    >
+                      <option value="">
+                        {fetchedGroups?.length ? '— Выберите группу —' : 'Сначала нажмите «Загрузить группы»'}
+                      </option>
+                      {(fetchedGroups ?? []).map((g) => (
+                        <option key={g.id} value={String(g.id)}>
+                          {g.full_path}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="btn-inline"
+                      disabled={
+                        groupMembersLoading ||
+                        !gitlabUrl.trim() ||
+                        !token.trim() ||
+                        !selectedGroupId.trim()
+                      }
+                      onClick={() => void handleApplyGroupMembers()}
+                    >
+                      {groupMembersLoading ? 'Загрузка…' : 'Подставить участников'}
+                    </button>
+                  </div>
+                  {groupsListError ? (
+                    <p className="field-inline-msg field-inline-msg--error" role="alert">
+                      {groupsListError}
+                    </p>
+                  ) : null}
+                  {groupsListHint ? <p className="field-inline-msg hint">{groupsListHint}</p> : null}
+                </div>
               </div>
 
               <div className="field periods-field">

@@ -120,10 +120,13 @@ export function ActivitySeriesLegend({
   visibility: visibilityRaw,
   onVisibilityChange,
   showMrsCreatedSeries = true,
+  /** Закрепить легенду у верха вьюпорта при прокрутке (несколько графиков подряд). */
+  sticky = false,
 }: {
   visibility: Record<ActivitySeriesKey, boolean>
   onVisibilityChange: (next: Record<ActivitySeriesKey, boolean>) => void
   showMrsCreatedSeries?: boolean
+  sticky?: boolean
 }) {
   const seriesOrder = showMrsCreatedSeries ? SERIES_ORDER : SERIES_ORDER_NO_MR
   const visibility: Record<SeriesKey, boolean> = showMrsCreatedSeries
@@ -143,7 +146,12 @@ export function ActivitySeriesLegend({
   }
 
   return (
-    <div className="activity-chart activity-chart--legend-only">
+    <div
+      className={
+        'activity-chart activity-chart--legend-only' +
+        (sticky ? ' activity-chart--legend-sticky' : '')
+      }
+    >
       <ul className="activity-chart-legend" aria-label="Серии на графиках — нажмите, чтобы скрыть или показать">
         {seriesOrder.map((key) => (
           <li key={key}>

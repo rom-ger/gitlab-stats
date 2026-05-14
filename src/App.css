@@ -921,6 +921,18 @@
   margin-bottom: 0.35rem;
 }
 
+.activity-chart--legend-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 25;
+  margin-top: -0.15rem;
+  margin-bottom: 0.75rem;
+  padding: 0.55rem 0 0.65rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+}
+
 .activity-chart-global-legend-hint {
   margin: 0.5rem 0 0;
   font-size: 0.78rem;
@@ -1273,6 +1285,50 @@
 
 .periods-field {
   gap: 0.65rem;
+}
+
+.group-pick-panel {
+  margin-top: 0.35rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 0.65rem;
+  border: 1px dashed var(--border);
+  background: color-mix(in srgb, var(--surface-2) 88%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.group-pick-title {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 650;
+  color: var(--text-strong);
+}
+
+.group-pick-lead {
+  margin: 0;
+}
+
+.group-pick-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.group-pick-select {
+  flex: 1 1 12rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+  font-size: 0.85rem;
+  border-radius: 0.45rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
 }
 
 .periods-hint {
