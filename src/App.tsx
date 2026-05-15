@@ -434,6 +434,36 @@ function todayLocalYmd(): string {
   return `${y}-${m}-${day}`
 }
 
+/** Сдвиг календарной даты YYYY-MM-DD в локальной таймзоне. */
+function localYmdAddDays(ymd: string, deltaDays: number): string {
+  const [y, m, d] = ymd.split('-').map(Number)
+  if (!y || !m || !d) return ymd
+  const dt = new Date(y, m - 1, d)
+  dt.setDate(dt.getDate() + deltaDays)
+  const yy = dt.getFullYear()
+  const mm = String(dt.getMonth() + 1).padStart(2, '0')
+  const dd = String(dt.getDate()).padStart(2, '0')
+  return `${yy}-${mm}-${dd}`
+}
+
+type QuickPeriodPreset = 'day' | 'week' | 'month' | 'halfYear' | 'year'
+
+/** Конец — сегодня; длина: день / 7 / 30 / ~полгода / год календарных суток. */
+function quickPeriodDateRange(preset: QuickPeriodPreset): { startDate: string; endDate: string } {
+  const endDate = todayLocalYmd()
+  const backDays =
+    preset === 'day'
+      ? 0
+      : preset === 'week'
+        ? 6
+        : preset === 'month'
+          ? 29
+          : preset === 'halfYear'
+            ? 182
+            : 364
+  return { startDate: localYmdAddDays(endDate, -backDays), endDate }
+}
+
 function padDateParts(y: number, m: number, d: number): { start: string; end: string } {
   const startLocal = new Date(y, m - 1, d, 0, 0, 0, 0)
   const endLocal = new Date(y, m - 1, d, 23, 59, 59, 999)
@@ -816,8 +846,6 @@ export default function App() {
       gitlabUrl,
       token,
       userId,
-      after: range.after,
-      before: range.before,
       startDate: row.startDate,
       endDate: endEffectiveYmd,
       timeZone,
@@ -2388,6 +2416,30 @@ export default function App() {
               Удалить
               </button>
               ) : null}
+              </div>
+              <div
+                className="period-quick-presets"
+                role="group"
+                aria-label="Быстрый выбор периода до сегодня"
+              >
+                {(
+                  [
+                    ['day', 'День'],
+                    ['week', 'Неделя'],
+                    ['month', 'Месяц'],
+                    ['halfYear', 'Полгода'],
+                    ['year', 'Год'],
+                  ] as const
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    className="btn-inline period-preset-btn"
+                    onClick={() => updatePeriodRow(row.id, quickPeriodDateRange(key))}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
               <div className="field-row">
               <label className="field">

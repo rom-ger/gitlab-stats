@@ -1375,6 +1375,20 @@
   color: var(--text-strong);
 }
 
+.period-quick-presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.55rem;
+}
+
+.period-preset-btn {
+  font-size: 0.72rem;
+  padding: 0.38rem 0.55rem;
+  border-radius: 0.5rem;
+}
+
 .btn-danger-ghost {
   color: #f85149;
   border-color: rgba(248, 81, 73, 0.35);

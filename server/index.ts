@@ -1856,12 +1856,90 @@ app.post('/api/merge-requests-total', async (req, res) => {
 
 const ymdRe = /^\d{4}-\d{2}-\d{2}$/
 
+function pad2(n: number): string {
+  return String(n).padStart(2, '0')
+}
+
+/** Сдвиг календарной даты YYYY-MM-DD (григорианская арифметика через UTC). */
+function addCalendarDaysToYmd(ymd: string, deltaDays: number): string | null {
+  if (!ymdRe.test(ymd)) return null
+  const [y, mo, d] = ymd.split('-').map(Number)
+  const shifted = new Date(Date.UTC(y, mo - 1, d) + deltaDays * 86400000)
+  return `${shifted.getUTCFullYear()}-${pad2(shifted.getUTCMonth() + 1)}-${pad2(shifted.getUTCDate())}`
+}
+
+/**
+ * UTC-момент для заданных гражданских часов в IANA-зоне (sv-SE + бинпоиск).
+ * Нужен, чтобы согласовать границы с GitLab и с разбивкой по дням на клиенте.
+ */
+function civilWallTimeToUtcMs(
+  timeZone: string,
+  y: number,
+  mon: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+): number {
+  const want = `${y}-${pad2(mon)}-${pad2(day)} ${pad2(hour)}:${pad2(minute)}:${pad2(second)}`
+  const fmt = new Intl.DateTimeFormat('sv-SE', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  })
+  let lo = Date.UTC(y, mon - 1, day - 2, 0, 0, 0, 0)
+  let hi = Date.UTC(y, mon - 1, day + 2, 23, 59, 59, 999)
+  while (lo < hi - 1) {
+    const mid = Math.floor((lo + hi) / 2)
+    if (fmt.format(new Date(mid)) < want) lo = mid
+    else hi = mid
+  }
+  for (let t = hi - 5000; t <= hi + 5000; t++) {
+    if (fmt.format(new Date(t)) === want) return t
+  }
+  return hi
+}
+
+/**
+ * GitLab EventsFinder фильтрует так: created_at > after.end_of_day и created_at < before.beginning_of_day
+ * (в зоне, которую Rails привязывает к распарсенному времени). Поэтому передаём полдень на (start−1) и (end+1)
+ * в таймзоне пользователя — получаем ровно календарные start..end в этой зоне.
+ */
+function gitlabUserEventsApiAfterBefore(sd: string, ed: string, timeZone: string): { after: string; before: string } {
+  const ymdAfter = addCalendarDaysToYmd(sd, -1)!
+  const ymdBefore = addCalendarDaysToYmd(ed, 1)!
+  const [ay, am, ad] = ymdAfter.split('-').map(Number)
+  const [by, bm, bd] = ymdBefore.split('-').map(Number)
+  const afterMs = civilWallTimeToUtcMs(timeZone, ay, am, ad, 12, 0, 0)
+  const beforeMs = civilWallTimeToUtcMs(timeZone, by, bm, bd, 12, 0, 0)
+  return { after: new Date(afterMs).toISOString(), before: new Date(beforeMs).toISOString() }
+}
+
+/** Merge Requests API: created_on_or_after / created_on_or_before по ISO — границы суток в зоне пользователя. */
+function mergeRequestCreatedRangeIso(
+  sd: string,
+  ed: string,
+  timeZone: string,
+): { created_after: string; created_before: string } {
+  const [sy, sm, sda] = sd.split('-').map(Number)
+  const [ey, em, eda] = ed.split('-').map(Number)
+  const afterMs = civilWallTimeToUtcMs(timeZone, sy, sm, sda, 0, 0, 0)
+  const beforeMs = civilWallTimeToUtcMs(timeZone, ey, em, eda, 23, 59, 59) + 999
+  return {
+    created_after: new Date(afterMs).toISOString(),
+    created_before: new Date(beforeMs).toISOString(),
+  }
+}
+
 app.post('/api/activity-by-day', async (req, res) => {
   const gitlabUrl = req.body?.gitlabUrl as string | undefined
   const token = req.body?.token as string | undefined
   const userId = req.body?.userId as number | undefined
-  const after = req.body?.after as string | undefined
-  const before = req.body?.before as string | undefined
   const startDate = req.body?.startDate as string | undefined
   const endDate = req.body?.endDate as string | undefined
   const timeZone = safeTimeZone(req.body?.timeZone as string | undefined)
@@ -1870,8 +1948,6 @@ app.post('/api/activity-by-day', async (req, res) => {
     !gitlabUrl?.trim() ||
     !token?.trim() ||
     typeof userId !== 'number' ||
-    !after?.trim() ||
-    !before?.trim() ||
     !startDate?.trim() ||
     !endDate?.trim()
   ) {
@@ -1891,13 +1967,13 @@ app.post('/api/activity-by-day', async (req, res) => {
   }
 
   const base = normalizeBaseUrl(gitlabUrl)
-  const ra = after.trim()
-  const rb = before.trim()
+  const eventRange = gitlabUserEventsApiAfterBefore(sd, ed, timeZone)
+  const mrRange = mergeRequestCreatedRangeIso(sd, ed, timeZone)
 
   function userEventsSearch(extra: Record<string, string>): string {
     const p = new URLSearchParams({
-      after: ra,
-      before: rb,
+      after: eventRange.after,
+      before: eventRange.before,
       per_page: String(PER_PAGE),
     })
     for (const [k, v] of Object.entries(extra)) {
@@ -1917,8 +1993,8 @@ app.post('/api/activity-by-day', async (req, res) => {
 
   const mrBaseParams = new URLSearchParams({
     author_id: String(userId),
-    created_after: ra,
-    created_before: rb,
+    created_after: mrRange.created_after,
+    created_before: mrRange.created_before,
     per_page: String(PER_PAGE),
     state: 'all',
     scope: 'all',
