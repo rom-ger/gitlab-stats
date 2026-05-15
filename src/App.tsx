@@ -239,6 +239,85 @@ function sortComparePeriodResults(rows: PeriodResult[], sort: CompareTableSort |
   })
 }
 
+function csvEscapeCell(raw: string): string {
+  const s = String(raw).replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  if (s.includes('"')) return `"${s.replace(/"/g, '""')}"`
+  if (/[",\n]/.test(s)) return `"${s}"`
+  return s
+}
+
+function csvWriteRows(lines: string[][]): string {
+  return lines.map((cells) => cells.map(csvEscapeCell).join(',')).join('\r\n') + '\r\n'
+}
+
+function downloadUtf8Csv(filename: string, content: string) {
+  const blob = new Blob([`\uFEFF${content}`], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+function buildCompareTableCsv(
+  rows: PeriodResult[],
+  showCompareUserColumn: boolean,
+  showComparePeriodColumn: boolean,
+  formatRangeShort: (pr: PeriodResult) => string,
+): string {
+  const header: string[] = []
+  if (showCompareUserColumn) {
+    header.push('Имя', 'Логин')
+  } else if (showComparePeriodColumn) {
+    header.push(COMPARE_SORT_COL_LABELS.range, COMPARE_SORT_COL_LABELS.days)
+  } else {
+    header.push(COMPARE_SORT_COL_LABELS.approved)
+  }
+  if (showCompareUserColumn || showComparePeriodColumn) {
+    header.push(COMPARE_SORT_COL_LABELS.approved)
+  }
+  header.push(
+    COMPARE_SORT_COL_LABELS.approvedMrsDiffLines,
+    COMPARE_SORT_COL_LABELS.commented,
+    COMPARE_SORT_COL_LABELS.pushCommits,
+    COMPARE_SORT_COL_LABELS.commPerAppr,
+    COMPARE_SORT_COL_LABELS.linesPerComm,
+    COMPARE_SORT_COL_LABELS.medianLinesPerCommMr,
+    COMPARE_SORT_COL_LABELS.effectiveness,
+  )
+
+  const dataLines = rows.map((pr) => {
+    const cells: string[] = []
+    if (showCompareUserColumn) {
+      cells.push(pr.userDisplayName, pr.userLogin)
+    } else if (showComparePeriodColumn) {
+      cells.push(formatRangeShort(pr), String(pr.activityByDay.length))
+    } else {
+      cells.push(pr.stats.approved)
+    }
+    if (showCompareUserColumn || showComparePeriodColumn) {
+      cells.push(pr.stats.approved)
+    }
+    const commPer = commPerApprNumeric(pr)
+    cells.push(
+      pr.stats.approvedMrsDiffLines,
+      pr.stats.commented,
+      pr.stats.pushCommits,
+      commPer == null ? '' : String(commPer),
+      pr.stats.avgLinesPerComment,
+      pr.stats.medianLinesPerCommentByMr,
+      String(effectivenessScoreFromPeriod(pr).score),
+    )
+    return cells
+  })
+
+  return csvWriteRows([header, ...dataLines])
+}
+
 type UserResultsBundle = {
   userRowId: string
   resolvedUsername: string
@@ -476,6 +555,14 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return data
 }
 
+/** Кого не показывать в выпадающем списке выбора сотрудника. */
+function isPickableSelectorUser(u: { username: string; name: string }): boolean {
+  const name = u.name ?? ''
+  if (name.trimStart().startsWith('****')) return false
+  if (/\bproject\b/i.test(name)) return false
+  return true
+}
+
 function userRowsFromGroupMembers(members: { username: string; name: string }[]): PersistedCompareUser[] {
   const seen = new Set<string>()
   const out: PersistedCompareUser[] = []
@@ -544,6 +631,12 @@ export default function App() {
 
   const filledCompareUserCount = useMemo(
     () => userRows.filter((u) => u.username.trim()).length,
+    [userRows],
+  )
+  const canResetAllCompareUsers = useMemo(
+    () =>
+      userRows.length > 1 ||
+      userRows.some((r) => Boolean(r.username.trim()) || r.userEntryMode === 'manual'),
     [userRows],
   )
   const filledActivePeriodCount = useMemo(
@@ -618,18 +711,37 @@ export default function App() {
         if (!m.has(u.username)) m.set(u.username, u)
       }
     }
-    return [...m.values()].sort((a, b) =>
-      (a.name || a.username).localeCompare(b.name || b.username, 'ru', { sensitivity: 'base' }),
-    )
+    return [...m.values()]
+      .filter(isPickableSelectorUser)
+      .sort((a, b) =>
+        (a.name || a.username).localeCompare(b.name || b.username, 'ru', { sensitivity: 'base' }),
+      )
   }, [fetchedUserList])
 
   const filteredSelectUsers = useMemo(() => {
+    const tid = userPickerOpen ? (pickerAnchorUserRowId ?? userRows[0]?.id ?? null) : null
+    let pool = mergedSelectUsers
+    if (tid) {
+      const takenLower = new Set(
+        userRows
+          .filter((r) => r.id !== tid && r.username.trim())
+          .map((r) => r.username.trim().toLowerCase()),
+      )
+      pool = mergedSelectUsers.filter((u) => !takenLower.has(u.username.toLowerCase()))
+    }
     const q = userSearchQuery.trim().toLowerCase()
-    if (!q) return mergedSelectUsers
-    return mergedSelectUsers.filter(
+    if (!q) return pool
+    return pool.filter(
       (u) => u.username.toLowerCase().includes(q) || u.name.toLowerCase().includes(q),
     )
-  }, [mergedSelectUsers, userSearchQuery])
+  }, [mergedSelectUsers, userSearchQuery, userPickerOpen, pickerAnchorUserRowId, userRows])
+
+  const pickableUsersNotYetSelected = useMemo(() => {
+    const sel = new Set(
+      userRows.map((r) => r.username.trim().toLowerCase()).filter(Boolean),
+    )
+    return mergedSelectUsers.filter((u) => !sel.has(u.username.toLowerCase()))
+  }, [mergedSelectUsers, userRows])
 
   const userPickerOtherIndex =
     filteredSelectUsers.length > 0 ? filteredSelectUsers.length : 0
@@ -1178,8 +1290,56 @@ export default function App() {
     setPeriodRows((rows) => (rows.length <= 1 ? rows : [rows[0]]))
   }
 
+  function addAllPickableUsersFromSelector() {
+    const toAssign = pickableUsersNotYetSelected
+    if (toAssign.length === 0) return
+
+    setUserRows((rows) => {
+      const newRows = rows.map((r) => ({ ...r }))
+      let ti = 0
+      for (let i = 0; i < newRows.length && ti < toAssign.length; i++) {
+        if (!newRows[i].username.trim()) {
+          newRows[i] = {
+            ...newRows[i],
+            username: toAssign[ti].username,
+            userEntryMode: 'list',
+          }
+          ti++
+        }
+      }
+      while (ti < toAssign.length) {
+        newRows.push({
+          ...createEmptyCompareUserRow(),
+          username: toAssign[ti].username,
+          userEntryMode: 'list',
+        })
+        ti++
+      }
+      return newRows
+    })
+    setPeriodRows((rows) => (rows.length <= 1 ? rows : [rows[0]]))
+    setUserPickerOpen(false)
+    setPickerAnchorUserRowId(null)
+    setUserSearchQuery('')
+    setUserListHighlight(0)
+  }
+
   function removeCompareUserRow(id: string) {
     setUserRows((rows) => (rows.length <= 1 ? rows : rows.filter((r) => r.id !== id)))
+  }
+
+  function resetAllCompareUsers() {
+    setUserRows([createEmptyCompareUserRow()])
+    setUserPickerOpen(false)
+    setPickerAnchorUserRowId(null)
+    setUserSearchQuery('')
+    setUserListHighlight(0)
+    setUserBundles(null)
+    setError(null)
+    setResolvedName(null)
+    setCompareUserCount(0)
+    setComparePeriodCount(0)
+    setCompareTableSort(null)
   }
 
   function periodRowTitle(index: number): string {
@@ -1259,6 +1419,17 @@ export default function App() {
     () => sortComparePeriodResults(flatPeriodResults, compareTableSort),
     [flatPeriodResults, compareTableSort],
   )
+
+  function handleExportCompareTableCsv() {
+    const csv = buildCompareTableCsv(
+      sortedCompareTableRows,
+      showCompareUserColumn,
+      showComparePeriodColumn,
+      formatPeriodRangeShort,
+    )
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+    downloadUtf8Csv(`gitlab-stats-compare-${stamp}.csv`, csv)
+  }
 
   function renderCompareSortTh(
     colKey: CompareTableSortKey,
@@ -1361,9 +1532,18 @@ export default function App() {
             <>
               {flatPeriodResults.length > 1 ? (
                 <div className="compare-wrap">
-                  <h2 className="compare-heading">
-                    {compareUserCount > 1 ? 'Сравнение сотрудников' : 'Сравнение периодов'}
-                  </h2>
+                  <div className="compare-heading-row">
+                    <h2 className="compare-heading">
+                      {compareUserCount > 1 ? 'Сравнение сотрудников' : 'Сравнение периодов'}
+                    </h2>
+                    <button
+                      type="button"
+                      className="btn-inline compare-export-csv-btn"
+                      onClick={handleExportCompareTableCsv}
+                    >
+                      Выгрузить CSV
+                    </button>
+                  </div>
                   {compareTableDaysCaption && !showComparePeriodColumn ? (
                     <div className="compare-days-line">
                       {compareTableDaysCaption.uniform ? (
@@ -2068,6 +2248,19 @@ export default function App() {
                                   autoComplete="off"
                                   aria-label="Поиск по списку сотрудников"
                                 />
+                                <div className="user-picker-bulk">
+                                  <button
+                                    type="button"
+                                    className="user-picker-bulk-btn"
+                                    disabled={pickableUsersNotYetSelected.length === 0}
+                                    onClick={() => addAllPickableUsersFromSelector()}
+                                  >
+                                    Добавить всех из списка
+                                    {pickableUsersNotYetSelected.length > 0
+                                      ? ` (${pickableUsersNotYetSelected.length})`
+                                      : ''}
+                                  </button>
+                                </div>
                                 <ul className="user-picker-options">
                                   {filteredSelectUsers.length === 0 ? (
                                     <li className="user-picker-empty" role="presentation">
@@ -2143,9 +2336,19 @@ export default function App() {
                   </p>
                 ) : null}
                 {usersListHint ? <p className="field-inline-msg hint">{usersListHint}</p> : null}
-                <button type="button" className="btn-inline add-period-btn" onClick={addCompareUserRow}>
-                  + Добавить сотрудника для сравнения
-                </button>
+                <div className="field-users-footer">
+                  <button type="button" className="btn-inline add-period-btn" onClick={addCompareUserRow}>
+                    + Добавить сотрудника для сравнения
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-inline btn-danger-ghost add-period-btn"
+                    disabled={!canResetAllCompareUsers}
+                    onClick={resetAllCompareUsers}
+                  >
+                    Сбросить сотрудников
+                  </button>
+                </div>
                 <div className="group-pick-panel" aria-label="Подстановка сотрудников из группы GitLab">
                   <p className="group-pick-title">Дополнительно: из группы GitLab</p>
                   <p className="hint group-pick-lead">
