@@ -53,22 +53,6 @@ const MAX_GROUP_LIST_PAGES = 200
 /** Пагинация GET /groups/:id/members. */
 const MAX_GROUP_MEMBER_PAGES = 200
 
-/**
- * Учитываются только MR автора с target_branch из списка (merge в develop или в dev).
- * При необходимости добавьте ветки в этот массив.
- */
-const AUTHOR_MR_TARGET_BRANCHES = ['develop', 'dev'] as const
-
-function mrTargetBranchAllowed(raw: unknown): boolean {
-  if (typeof raw !== 'string' || !raw.trim()) return false
-  const lower = raw.trim().toLowerCase()
-  return (AUTHOR_MR_TARGET_BRANCHES as readonly string[]).includes(lower)
-}
-
-function filterMrsByAllowedTargetBranch(rows: GitlabItem[]): GitlabItem[] {
-  return rows.filter((row) => mrTargetBranchAllowed(asRecord(row)['target_branch']))
-}
-
 function compareYmd(a: string, b: string): number {
   if (a < b) return -1
   if (a > b) return 1
@@ -121,7 +105,7 @@ function dayKeyInTimeZone(iso: string, timeZone: string): string {
 
 type GitlabItem = { created_at?: unknown }
 
-type DayDetailKind = 'approved' | 'commented' | 'mr_created' | 'push_commits'
+type DayDetailKind = 'approved' | 'commented' | 'push_commits'
 
 type DayDetailItem = {
   id: string
@@ -928,23 +912,6 @@ function mergeMedianMrBreakdownWithEventData(
   })
 }
 
-/** Уникальные MR из списка /merge_requests (project_id + iid). */
-function uniqueMergeRequestTargetsFromMrList(mrList: GitlabItem[]): { pid: number; iid: number }[] {
-  const seen = new Set<string>()
-  const out: { pid: number; iid: number }[] = []
-  for (const row of mrList) {
-    const m = asRecord(row)
-    const pid = asPositiveInt(m['project_id'])
-    const iid = asPositiveInt(m['iid'])
-    if (pid == null || iid == null) continue
-    const key = mrTargetKey(pid, iid)
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push({ pid, iid })
-  }
-  return out
-}
-
 function parseUnidiffLineStats(diff: string): { additions: number; deletions: number } {
   let additions = 0
   let deletions = 0
@@ -1128,23 +1095,21 @@ async function fetchMrDiffLineTotal(
 }
 
 /**
- * Считает дифф по MR для детализации и сводки: объединяет уникальные MR из одобрений, созданных и из комментариев,
- * чтобы не дублировать запросы; сумма approvedMrsDiffLinesTotal — только по MR из одобрений (как раньше).
+ * Считает дифф по MR для детализации и сводки: объединяет уникальные MR из одобрений и из комментариев,
+ * чтобы не дублировать запросы; сумма approvedMrsDiffLinesTotal — только по MR из одобрений.
  */
 async function mergeRequestDiffLinesForApprovedTotalAndDetail(
   base: string,
   token: string,
   paths: Map<number, string>,
   approvedList: GitlabItem[],
-  mrList: GitlabItem[],
   commentedList: GitlabItem[],
 ): Promise<{ approvedMrsDiffLinesTotal: number; byKey: Map<string, number> }> {
   const approvedTargets = uniqueApprovedMergeRequestTargets(approvedList)
-  const createdTargets = uniqueMergeRequestTargetsFromMrList(mrList)
   const commentedTargets = uniqueMergeRequestTargetsFromCommentedList(commentedList)
   const seen = new Set<string>()
   const fetchTargets: { pid: number; iid: number }[] = []
-  for (const t of [...approvedTargets, ...createdTargets, ...commentedTargets]) {
+  for (const t of [...approvedTargets, ...commentedTargets]) {
     const k = mrTargetKey(t.pid, t.iid)
     if (seen.has(k)) continue
     seen.add(k)
@@ -1284,25 +1249,6 @@ function tryReadMrLineStatsFromCommentNoteable(e: Record<string, unknown>): numb
   return tryReadAdditionsDeletionsSum(nb)
 }
 
-function readChangesCountField(raw: unknown): number | null {
-  if (typeof raw === 'number' && Number.isFinite(raw)) return Math.max(0, Math.trunc(raw))
-  if (typeof raw === 'string') {
-    const t = raw.trim()
-    if (/^\d+$/.test(t)) return Number.parseInt(t, 10)
-  }
-  return null
-}
-
-/** Размер созданного MR из объекта списка /merge_requests (без доп. запросов). */
-function readMrSizeFromMergeRequestListItem(m: Record<string, unknown>): {
-  lines: number | null
-  files: number | null
-} {
-  const lines = tryReadAdditionsDeletionsSum(m)
-  const files = readChangesCountField(m['changes_count'])
-  return { lines, files }
-}
-
 function sortDetailItemsDesc(items: DayDetailItem[]): void {
   items.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
 }
@@ -1314,7 +1260,6 @@ function buildDetailByDay(
   timeZone: string,
   approvedList: GitlabItem[],
   commentedList: GitlabItem[],
-  mrList: GitlabItem[],
   pushedList: GitlabItem[],
   mrDiffLinesByKey: ReadonlyMap<string, number>,
   commentWebUrlByEventId?: Map<number, string>,
@@ -1390,36 +1335,6 @@ function buildDetailByDay(
       commentBody: eventCommentBody(e),
       mrDiffLines,
       mrChangesCount: null,
-    })
-  }
-
-  for (const row of mrList) {
-    const dk = dayOf(row)
-    if (!dk) continue
-    const m = asRecord(row)
-    const id = m['id']
-    const created = m['created_at']
-    const title = m['title']
-    const web = m['web_url']
-    const pid = asPositiveInt(m['project_id'])
-    const iid = asPositiveInt(m['iid'])
-    const mapKey = pid != null && iid != null ? mrTargetKey(pid, iid) : null
-    const { lines: listLines, files: listFiles } = readMrSizeFromMergeRequestListItem(m)
-    let mrDiffLines: number | null = null
-    if (mapKey != null && mrDiffLinesByKey.has(mapKey)) {
-      mrDiffLines = mrDiffLinesByKey.get(mapKey)!
-    } else if (listLines != null) {
-      mrDiffLines = listLines
-    }
-    out[dk].push({
-      id: `mr-${typeof id === 'number' ? id : `${dk}-${out[dk].length}`}`,
-      kind: 'mr_created',
-      title: typeof title === 'string' && title.trim() ? title.trim() : 'Merge request',
-      createdAt: typeof created === 'string' ? created : '',
-      webUrl: typeof web === 'string' && /^https?:\/\//i.test(web) ? web : null,
-      commentBody: null,
-      mrDiffLines,
-      mrChangesCount: listFiles,
     })
   }
 
@@ -1800,60 +1715,6 @@ app.post('/api/events-total', async (req, res) => {
   await respondWithGitlabListTotal(res, url, token.trim())
 })
 
-app.post('/api/merge-requests-total', async (req, res) => {
-  const gitlabUrl = req.body?.gitlabUrl as string | undefined
-  const token = req.body?.token as string | undefined
-  const userId = req.body?.userId as number | undefined
-  const createdAfter = req.body?.createdAfter as string | undefined
-  const createdBefore = req.body?.createdBefore as string | undefined
-
-  if (
-    !gitlabUrl?.trim() ||
-    !token?.trim() ||
-    typeof userId !== 'number' ||
-    !createdAfter?.trim() ||
-    !createdBefore?.trim()
-  ) {
-    res.status(400).json({ error: 'Неполные параметры запроса.' })
-    return
-  }
-
-  const base = normalizeBaseUrl(gitlabUrl)
-  const baseMrParams = new URLSearchParams({
-    author_id: String(userId),
-    created_after: createdAfter.trim(),
-    created_before: createdBefore.trim(),
-    per_page: String(PER_PAGE),
-    state: 'all',
-    scope: 'all',
-  })
-
-  const branchResults = await Promise.all(
-    AUTHOR_MR_TARGET_BRANCHES.map(async (branch) => {
-      const p = new URLSearchParams(baseMrParams)
-      p.set('target_branch', branch)
-      const url = `${base}/api/v4/merge_requests?${p}`
-      return readGitlabListTotalNumber(url, token.trim())
-    }),
-  )
-
-  let sum = 0
-  let lastHttpStatus = 200
-  for (const r of branchResults) {
-    if (!r.ok) {
-      res.status(r.status).json({ error: r.message })
-      return
-    }
-    sum += r.total
-    lastHttpStatus = r.httpStatus
-  }
-
-  res.json({
-    total: String(sum),
-    status: lastHttpStatus,
-  })
-})
-
 const ymdRe = /^\d{4}-\d{2}-\d{2}$/
 
 function pad2(n: number): string {
@@ -1920,22 +1781,6 @@ function gitlabUserEventsApiAfterBefore(sd: string, ed: string, timeZone: string
   return { after: new Date(afterMs).toISOString(), before: new Date(beforeMs).toISOString() }
 }
 
-/** Merge Requests API: created_on_or_after / created_on_or_before по ISO — границы суток в зоне пользователя. */
-function mergeRequestCreatedRangeIso(
-  sd: string,
-  ed: string,
-  timeZone: string,
-): { created_after: string; created_before: string } {
-  const [sy, sm, sda] = sd.split('-').map(Number)
-  const [ey, em, eda] = ed.split('-').map(Number)
-  const afterMs = civilWallTimeToUtcMs(timeZone, sy, sm, sda, 0, 0, 0)
-  const beforeMs = civilWallTimeToUtcMs(timeZone, ey, em, eda, 23, 59, 59) + 999
-  return {
-    created_after: new Date(afterMs).toISOString(),
-    created_before: new Date(beforeMs).toISOString(),
-  }
-}
-
 app.post('/api/activity-by-day', async (req, res) => {
   const gitlabUrl = req.body?.gitlabUrl as string | undefined
   const token = req.body?.token as string | undefined
@@ -1968,7 +1813,6 @@ app.post('/api/activity-by-day', async (req, res) => {
 
   const base = normalizeBaseUrl(gitlabUrl)
   const eventRange = gitlabUserEventsApiAfterBefore(sd, ed, timeZone)
-  const mrRange = mergeRequestCreatedRangeIso(sd, ed, timeZone)
 
   function userEventsSearch(extra: Record<string, string>): string {
     const p = new URLSearchParams({
@@ -1991,31 +1835,14 @@ app.post('/api/activity-by-day', async (req, res) => {
   const pushedUrl = (page: number) =>
     `${base}/api/v4/users/${userId}/events?${userEventsSearch({ action: 'pushed' })}&page=${page}`
 
-  const mrBaseParams = new URLSearchParams({
-    author_id: String(userId),
-    created_after: mrRange.created_after,
-    created_before: mrRange.created_before,
-    per_page: String(PER_PAGE),
-    state: 'all',
-    scope: 'all',
-  })
-
-  const mrCollectTasks = AUTHOR_MR_TARGET_BRANCHES.map((branch) => {
-    const p = new URLSearchParams(mrBaseParams)
-    p.set('target_branch', branch)
-    const mrUrl = (page: number) => `${base}/api/v4/merge_requests?${p}&page=${page}`
-    return collectGitlabPagesOnly(mrUrl, token.trim())
-  })
-
-  const [approvedRes, commentedRes, noteRes, pushedRes, ...mrResList] = await Promise.all([
+  const [approvedRes, commentedRes, noteRes, pushedRes] = await Promise.all([
     collectGitlabPagesOnly(approvedUrl, token.trim()),
     collectGitlabPagesOnly(commentedUrl, token.trim()),
     collectGitlabPagesOnly(noteEventsUrl, token.trim()),
     collectGitlabPagesOnly(pushedUrl, token.trim()),
-    ...mrCollectTasks,
   ])
 
-  for (const result of [approvedRes, commentedRes, noteRes, pushedRes, ...mrResList]) {
+  for (const result of [approvedRes, commentedRes, noteRes, pushedRes]) {
     if (!result.ok) {
       const status = result.status >= 400 && result.status < 600 ? result.status : 502
       res.status(status).json({
@@ -2039,9 +1866,6 @@ app.post('/api/activity-by-day', async (req, res) => {
     userId,
     commentedDeduped,
   )
-  const mrList = dedupEventsById(
-    filterMrsByAllowedTargetBranch(mrResList.flatMap((r) => (r.ok ? r.items : []))),
-  )
   const pushedList = dedupEventsById(pushedRes.items).filter(
     (row) => !pushEventIsMergeBranchCommitTitle(asRecord(row)),
   )
@@ -2049,7 +1873,6 @@ app.post('/api/activity-by-day', async (req, res) => {
   const days = enumerateYmdInclusive(sd, ed)
   const approved = new Array<number>(days.length).fill(0)
   const commented = new Array<number>(days.length).fill(0)
-  const mrsCreated = new Array<number>(days.length).fill(0)
   const pushCommits = new Array<number>(days.length).fill(0)
   const indexByDay = new Map<string, number>()
   days.forEach((d, i) => indexByDay.set(d, i))
@@ -2063,7 +1886,7 @@ app.post('/api/activity-by-day', async (req, res) => {
     pushCommits[idx] += 1
   }
 
-  function bump(list: GitlabItem[], target: 'approved' | 'commented' | 'mrsCreated') {
+  function bump(list: GitlabItem[], target: 'approved' | 'commented') {
     for (const row of list) {
       const iso = row.created_at
       if (typeof iso !== 'string') continue
@@ -2071,24 +1894,17 @@ app.post('/api/activity-by-day', async (req, res) => {
       const idx = indexByDay.get(day)
       if (idx === undefined) continue
       if (target === 'approved') approved[idx] += 1
-      else if (target === 'commented') commented[idx] += 1
-      else mrsCreated[idx] += 1
+      else commented[idx] += 1
     }
   }
 
   bump(approvedList, 'approved')
   bump(commentedList, 'commented')
-  bump(mrList, 'mrsCreated')
 
   const projectIds: number[] = []
   for (const row of [...approvedList, ...commentedList]) {
     const e = asRecord(row)
     const pid = asPositiveInt(e['project_id'])
-    if (pid != null) projectIds.push(pid)
-  }
-  for (const row of mrList) {
-    const m = asRecord(row)
-    const pid = asPositiveInt(m['project_id'])
     if (pid != null) projectIds.push(pid)
   }
   for (const row of pushedList) {
@@ -2099,16 +1915,11 @@ app.post('/api/activity-by-day', async (req, res) => {
 
   const paths = await fetchProjectPaths(base, token.trim(), projectIds)
   const [diffBundle, commentWebUrlByEventId] = await Promise.all([
-    mergeRequestDiffLinesForApprovedTotalAndDetail(base, token.trim(), paths, approvedList, mrList, commentedList),
+    mergeRequestDiffLinesForApprovedTotalAndDetail(base, token.trim(), paths, approvedList, commentedList),
     enrichCommentedWebUrls(base, token.trim(), paths, commentedList),
   ])
   const approvedMrsDiffLinesTotal = diffBundle.approvedMrsDiffLinesTotal
   const mrDiffLinesByKey = diffBundle.byKey
-  const createdTargets = uniqueMergeRequestTargetsFromMrList(mrList)
-  let createdMrsDiffLinesTotal = 0
-  for (const t of createdTargets) {
-    createdMrsDiffLinesTotal += mrDiffLinesByKey.get(mrTargetKey(t.pid, t.iid)) ?? 0
-  }
   const foreignMrCommentCount = commentedList.length
   const avgLinesPerComment =
     foreignMrCommentCount > 0 ? approvedMrsDiffLinesTotal / foreignMrCommentCount : null
@@ -2122,28 +1933,6 @@ app.post('/api/activity-by-day', async (req, res) => {
     commentedList,
   )
 
-  const mrsCreatedDiffLinesByDay = new Array<number>(days.length).fill(0)
-  for (const row of mrList) {
-    const iso = row.created_at
-    if (typeof iso !== 'string') continue
-    const day = dayKeyInTimeZone(iso, timeZone)
-    const idx = indexByDay.get(day)
-    if (idx === undefined) continue
-    const m = asRecord(row)
-    const pid = asPositiveInt(m['project_id'])
-    const iid = asPositiveInt(m['iid'])
-    const mapKey = pid != null && iid != null ? mrTargetKey(pid, iid) : null
-    let lines = 0
-    if (mapKey != null && mrDiffLinesByKey.has(mapKey)) {
-      lines = mrDiffLinesByKey.get(mapKey) ?? 0
-    } else {
-      const { lines: listLines } = readMrSizeFromMergeRequestListItem(m)
-      lines =
-        listLines != null && Number.isFinite(listLines) ? Math.max(0, Math.trunc(listLines)) : 0
-    }
-    mrsCreatedDiffLinesByDay[idx] += lines
-  }
-
   const detailByDay = buildDetailByDay(
     base,
     paths,
@@ -2151,7 +1940,6 @@ app.post('/api/activity-by-day', async (req, res) => {
     timeZone,
     approvedList,
     commentedList,
-    mrList,
     pushedList,
     mrDiffLinesByKey,
     commentWebUrlByEventId,
@@ -2161,16 +1949,13 @@ app.post('/api/activity-by-day', async (req, res) => {
     days,
     approved,
     commented,
-    mrsCreated,
     /** Число событий pushed за день (каждое событие = 1); с commit_title, содержащим «Merge branch», не учитываются. */
     pushCommits,
     /** Согласовано с рядом pushCommits: сумма по дням в календарном диапазоне. */
     pushCommitsTotal: pushCommits.reduce((s, n) => s + n, 0),
-    mrsCreatedDiffLinesByDay,
     timeZone,
     detailByDay,
     approvedMrsDiffLinesTotal,
-    createdMrsDiffLinesTotal,
     foreignMrCommentCount,
     /** Разбивка комментариев в чужих MR по префиксу маркера в начале текста: [!], [?], [S], [P] или без маркера. */
     commentMarkerCounts: buildCommentMarkerCounts(commentedList),
@@ -2181,8 +1966,6 @@ app.post('/api/activity-by-day', async (req, res) => {
     medianLinesPerCommentMrBreakdown,
     /** События approved за интервал after/before (после дедупликации по id), для сводки без отдельного HEAD. */
     approvedEventsTotal: approvedList.length,
-    /** Созданные MR (develop/dev), уникальные по id после фильтра веток — согласовано с рядами mrsCreated. */
-    mergeRequestsCreatedTotal: mrList.length,
   })
 })
 

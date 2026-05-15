@@ -45,19 +45,16 @@ const initialForm = getInitialFormBootstrap()
  */
 let appInitialAutoLoadHandled = false
 
-/**
- * Временно скрыто от пользователей: раздел «Собственный код», индекс активности,
- * колонки таблицы сравнения про свой код и индекс, серия «созданные MR» на графике и вторая ось Y.
- * Поставьте true, чтобы снова показать.
- */
-const SHOW_CREATION_METRICS_AND_EFFECTIVENESS = false
-
 function activityChartVisibility(
   stored: Record<ActivitySeriesKey, boolean> | undefined,
 ): Record<ActivitySeriesKey, boolean> {
   const defaults = ACTIVITY_SERIES_DEFAULT_VISIBILITY
-  const merged = stored ? ({ ...defaults, ...stored } as Record<ActivitySeriesKey, boolean>) : defaults
-  return SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? merged : { ...merged, mrsCreated: false }
+  if (!stored) return defaults
+  return {
+    approved: stored.approved ?? defaults.approved,
+    commented: stored.commented ?? defaults.commented,
+    pushCommits: stored.pushCommits ?? defaults.pushCommits,
+  }
 }
 
 /** Подсказки к заголовкам таблицы сравнения периодов (нативный title / курсор help). */
@@ -71,16 +68,8 @@ const COMPARE_TABLE_COL_HINTS = {
     'Комментарии пользователя в merge request других авторов; комментарии в собственных MR не учитываются. В таблице сравнения нажмите на число — разбивка по маркерам [!], [?], [S], [P] и без маркера.',
   pushCommits:
     'Число событий push в GitLab за день (каждое событие считается за 1). Пуши, у которых в заголовке коммита есть фраза «Merge branch», не учитываются.',
-  mrsCreated:
-    'Число merge request с автором-пользователем за период с целевой веткой develop или dev (GitLab target_branch).',
   diffLines:
     'Сумма добавленных и удалённых строк по диффу для уникальных MR из событий одобрения за период.',
-  createdDiffLines:
-    'Сумма строк диффа по уникальным MR автора с target_branch develop или dev, созданным за период.',
-  avgCreatedDiffPerDay:
-    'Средняя сумма строк диффа по таким MR на календарный день периода (сумма / число дней в ряду).',
-  avgCreatedDiffPerMr:
-    'Средняя сумма строк диффа на один такой MR: сумма диффа / число MR в колонке «MR» (только develop и dev).',
   commPerAppr:
     'Отношение числа комментариев в чужих MR к числу одобрений за тот же период (комментариев на одно одобрение).',
   linesPerComm:
@@ -88,18 +77,14 @@ const COMPARE_TABLE_COL_HINTS = {
   medianLinesPerCommentMr:
     'Медиана по чужим MR: для MR с комментариями сотрудника — (строки диффа MR) / (число этих комментариев); для MR, где он только одобрил без комментариев, отношение считается 0. Учитываются все такие одобрения и комментарии в чужих MR. Собственные MR не входят.',
   effectiveness:
-    'Эвристический индекс 0–100: комментарии в чужих MR (интенсивность и глубина), свой код в develop/dev; без числа одобрений и без размера чужих MR.',
+    'Эвристический индекс 0–100: комментарии в чужих MR (интенсивность и медиана «стр./комм.» по MR), push-коммиты и баланс между ними; без метрик созданных MR и без числа одобрений как отдельного сигнала.',
 } as const
 
 type Stats = {
   approved: string
   commented: string
   pushCommits: string
-  mrsCreated: string
   approvedMrsDiffLines: string
-  createdMrsDiffLines: string
-  avgCreatedMrsDiffLinesPerDay: string
-  avgCreatedMrsDiffLinesPerMr: string
   avgLinesPerComment: string
   medianLinesPerCommentByMr: string
 }
@@ -135,10 +120,6 @@ type CompareTableSortKey =
   | 'commPerAppr'
   | 'linesPerComm'
   | 'medianLinesPerCommMr'
-  | 'mrsCreated'
-  | 'createdMrsDiffLines'
-  | 'avgCreatedPerDay'
-  | 'avgCreatedPerMr'
   | 'effectiveness'
 
 type CompareTableSort = { key: CompareTableSortKey; dir: 'asc' | 'desc' }
@@ -154,10 +135,6 @@ const COMPARE_SORT_COL_LABELS: Record<CompareTableSortKey, string> = {
   commPerAppr: 'Комм./одобр.',
   linesPerComm: 'Стр./комм.',
   medianLinesPerCommMr: 'Стр./комм. (мед.)',
-  mrsCreated: 'MR',
-  createdMrsDiffLines: 'Стр. диффа (созд.)',
-  avgCreatedPerDay: 'Ср. стр./день (созд.)',
-  avgCreatedPerMr: 'Ср. стр./MR (созд.)',
   effectiveness: 'Индекс',
 }
 
@@ -245,28 +222,6 @@ function comparePeriodResultByKey(a: PeriodResult, b: PeriodResult, key: Compare
         parseRuNumericStat(a.stats.medianLinesPerCommentByMr),
         parseRuNumericStat(b.stats.medianLinesPerCommentByMr),
       )
-    case 'mrsCreated': {
-      const na = Number.parseInt(a.stats.mrsCreated, 10)
-      const nb = Number.parseInt(b.stats.mrsCreated, 10)
-      const a0 = Number.isFinite(na) ? na : 0
-      const b0 = Number.isFinite(nb) ? nb : 0
-      return a0 - b0
-    }
-    case 'createdMrsDiffLines':
-      return compareNullableNumbers(
-        parseRuNumericStat(a.stats.createdMrsDiffLines),
-        parseRuNumericStat(b.stats.createdMrsDiffLines),
-      )
-    case 'avgCreatedPerDay':
-      return compareNullableNumbers(
-        parseRuNumericStat(a.stats.avgCreatedMrsDiffLinesPerDay),
-        parseRuNumericStat(b.stats.avgCreatedMrsDiffLinesPerDay),
-      )
-    case 'avgCreatedPerMr':
-      return compareNullableNumbers(
-        parseRuNumericStat(a.stats.avgCreatedMrsDiffLinesPerMr),
-        parseRuNumericStat(b.stats.avgCreatedMrsDiffLinesPerMr),
-      )
     case 'effectiveness':
       return effectivenessScoreFromPeriod(a).score - effectivenessScoreFromPeriod(b).score
     default:
@@ -294,7 +249,7 @@ type UserResultsBundle = {
 function activityEventSumForPeriod(pr: PeriodResult): number {
   let s = 0
   for (const p of pr.activityByDay) {
-    s += p.approved + p.commented + p.pushCommits + p.mrsCreated
+    s += p.approved + p.commented + p.pushCommits
   }
   return s
 }
@@ -305,7 +260,7 @@ function userBundleHasAnyActivity(bundle: UserResultsBundle): boolean {
 
 type DayDetailItem = {
   id: string
-  kind: 'approved' | 'commented' | 'mr_created' | 'push_commits'
+  kind: 'approved' | 'commented' | 'push_commits'
   title: string
   createdAt: string
   webUrl: string | null
@@ -378,14 +333,12 @@ function formatEventTime(iso: string): string {
 }
 
 function dayDetailKindLabel(kind: DayDetailItem['kind']): string {
-  if (kind === 'mr_created') return 'MR'
   if (kind === 'approved') return 'Одобрение'
   if (kind === 'push_commits') return 'Коммиты (push)'
   return 'Комментарий'
 }
 
 function dayDetailKindClass(kind: DayDetailItem['kind']): string {
-  if (kind === 'mr_created') return 'day-detail-kind day-detail-kind--mr'
   if (kind === 'approved') return 'day-detail-kind day-detail-kind--approved'
   if (kind === 'push_commits') return 'day-detail-kind day-detail-kind--push'
   return 'day-detail-kind day-detail-kind--commented'
@@ -828,19 +781,15 @@ export default function App() {
       days: string[]
       approved: number[]
       commented: number[]
-      mrsCreated: number[]
       pushCommits?: number[]
       pushCommitsTotal?: number
-      mrsCreatedDiffLinesByDay?: number[]
       detailByDay: Record<string, DayDetailItem[]>
       approvedMrsDiffLinesTotal: number
-      createdMrsDiffLinesTotal?: number
       foreignMrCommentCount: number
       avgLinesPerComment: number | null
       medianLinesPerCommentByMr?: number | null
       medianLinesPerCommentMrBreakdown?: unknown
       approvedEventsTotal?: number
-      mergeRequestsCreatedTotal?: number
       commentMarkerCounts?: Record<string, number>
     }>('/api/activity-by-day', {
       gitlabUrl,
@@ -855,12 +804,6 @@ export default function App() {
       typeof byDayRes.approvedEventsTotal === 'number' && Number.isFinite(byDayRes.approvedEventsTotal)
         ? byDayRes.approvedEventsTotal
         : byDayRes.approved.reduce((s, n) => s + (n ?? 0), 0),
-    )
-    const mrsCreatedTotalStr = String(
-      typeof byDayRes.mergeRequestsCreatedTotal === 'number' &&
-        Number.isFinite(byDayRes.mergeRequestsCreatedTotal)
-        ? byDayRes.mergeRequestsCreatedTotal
-        : byDayRes.mrsCreated.reduce((s, n) => s + (n ?? 0), 0),
     )
 
     const commentedSum = byDayRes.commented.reduce((s, n) => s + (n ?? 0), 0)
@@ -878,26 +821,6 @@ export default function App() {
       typeof byDayRes.approvedMrsDiffLinesTotal === 'number' && Number.isFinite(byDayRes.approvedMrsDiffLinesTotal)
         ? byDayRes.approvedMrsDiffLinesTotal
         : 0
-    const createdDiffTotal =
-      typeof byDayRes.createdMrsDiffLinesTotal === 'number' && Number.isFinite(byDayRes.createdMrsDiffLinesTotal)
-        ? byDayRes.createdMrsDiffLinesTotal
-        : 0
-    const calendarDays = byDayRes.days.length
-    const avgCreatedPerDayStr =
-      calendarDays > 0
-        ? (createdDiffTotal / calendarDays).toLocaleString('ru-RU', {
-            maximumFractionDigits: 1,
-            minimumFractionDigits: 0,
-          })
-        : '—'
-    const mrsCreatedNum = Number.parseInt(mrsCreatedTotalStr, 10)
-    const avgCreatedPerMrStr =
-      Number.isFinite(mrsCreatedNum) && mrsCreatedNum > 0
-        ? (createdDiffTotal / mrsCreatedNum).toLocaleString('ru-RU', {
-            maximumFractionDigits: 1,
-            minimumFractionDigits: 0,
-          })
-        : '—'
     const avgLines =
       byDayRes.avgLinesPerComment != null && Number.isFinite(byDayRes.avgLinesPerComment)
         ? byDayRes.avgLinesPerComment.toLocaleString('ru-RU', {
@@ -921,11 +844,7 @@ export default function App() {
       approved: approvedTotalStr,
       commented: String(commentCount),
       pushCommits: pushCommitsTotalStr,
-      mrsCreated: mrsCreatedTotalStr,
       approvedMrsDiffLines: diffLinesTotal.toLocaleString('ru-RU'),
-      createdMrsDiffLines: createdDiffTotal.toLocaleString('ru-RU'),
-      avgCreatedMrsDiffLinesPerDay: avgCreatedPerDayStr,
-      avgCreatedMrsDiffLinesPerMr: avgCreatedPerMrStr,
       avgLinesPerComment: avgLines,
       medianLinesPerCommentByMr: medianLinesPerCommentByMrStr,
     }
@@ -935,8 +854,6 @@ export default function App() {
       approved: byDayRes.approved[i] ?? 0,
       commented: byDayRes.commented[i] ?? 0,
       pushCommits: pushCommitsArr[i] ?? 0,
-      mrsCreated: byDayRes.mrsCreated[i] ?? 0,
-      mrsCreatedDiffLines: byDayRes.mrsCreatedDiffLinesByDay?.[i] ?? 0,
     }))
 
     return {
@@ -1247,8 +1164,7 @@ export default function App() {
     return items.filter((item) => {
       if (item.kind === 'approved') return vis.approved
       if (item.kind === 'commented') return vis.commented
-      if (item.kind === 'push_commits') return vis.pushCommits
-      return vis.mrsCreated
+      return vis.pushCommits
     })
   }
 
@@ -1335,7 +1251,6 @@ export default function App() {
   }, [flatPeriodResults])
 
   const singlePeriodEffectiveness = useMemo(() => {
-    if (!SHOW_CREATION_METRICS_AND_EFFECTIVENESS) return null
     if (userBundles?.length !== 1 || flatPeriodResults.length !== 1) return null
     return effectivenessScoreFromPeriod(flatPeriodResults[0])
   }, [userBundles, flatPeriodResults])
@@ -1540,37 +1455,9 @@ export default function App() {
                           )}
                           {renderCompareSortTh(
                             'medianLinesPerCommMr',
-                            SHOW_CREATION_METRICS_AND_EFFECTIVENESS
-                              ? 'compare-table-review'
-                              : 'compare-table-review compare-table-metric-group-start',
+                            'compare-table-review compare-table-metric-group-start',
                             COMPARE_TABLE_COL_HINTS.medianLinesPerCommentMr,
                             'Стр./комм. (мед.)',
-                          )}
-                          {SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? (
-                            <>
-                          {renderCompareSortTh(
-                            'mrsCreated',
-                            'compare-table-metric-group-start',
-                            COMPARE_TABLE_COL_HINTS.mrsCreated,
-                            'MR',
-                          )}
-                          {renderCompareSortTh(
-                            'createdMrsDiffLines',
-                            undefined,
-                            COMPARE_TABLE_COL_HINTS.createdDiffLines,
-                            'Стр. диффа (созд.)',
-                          )}
-                          {renderCompareSortTh(
-                            'avgCreatedPerDay',
-                            undefined,
-                            COMPARE_TABLE_COL_HINTS.avgCreatedDiffPerDay,
-                            'Ср. стр./день (созд.)',
-                          )}
-                          {renderCompareSortTh(
-                            'avgCreatedPerMr',
-                            undefined,
-                            COMPARE_TABLE_COL_HINTS.avgCreatedDiffPerMr,
-                            'Ср. стр./MR (созд.)',
                           )}
                           {renderCompareSortTh(
                             'effectiveness',
@@ -1578,15 +1465,11 @@ export default function App() {
                             COMPARE_TABLE_COL_HINTS.effectiveness,
                             'Индекс',
                           )}
-                            </>
-                          ) : null}
                         </tr>
                       </thead>
                       <tbody>
                         {sortedCompareTableRows.map((pr) => {
-                          const ev = SHOW_CREATION_METRICS_AND_EFFECTIVENESS
-                            ? effectivenessScoreFromPeriod(pr)
-                            : null
+                          const ev = effectivenessScoreFromPeriod(pr)
                           return (
                             <tr key={pr.chartKey}>
                             {showCompareUserColumn ? (
@@ -1625,13 +1508,7 @@ export default function App() {
                               {formatCommentsPerApproval(pr.stats.approved, pr.stats.commented)}
                             </td>
                             <td className="compare-table-review">{pr.stats.avgLinesPerComment}</td>
-                            <td
-                              className={
-                                SHOW_CREATION_METRICS_AND_EFFECTIVENESS
-                                  ? 'compare-table-review'
-                                  : 'compare-table-review compare-table-metric-group-start'
-                              }
-                            >
+                            <td className="compare-table-review compare-table-metric-group-start">
                               {pr.medianMrBreakdown.length > 0 ? (
                                 <button
                                   type="button"
@@ -1644,20 +1521,9 @@ export default function App() {
                                 pr.stats.medianLinesPerCommentByMr
                               )}
                             </td>
-                            {SHOW_CREATION_METRICS_AND_EFFECTIVENESS && ev ? (
-                              <>
-                            <td className="compare-table-metric-group-start">{pr.stats.mrsCreated}</td>
-                            <td>{pr.stats.createdMrsDiffLines}</td>
-                            <td>{pr.stats.avgCreatedMrsDiffLinesPerDay}</td>
-                            <td>{pr.stats.avgCreatedMrsDiffLinesPerMr}</td>
-                            <td
-                              className="compare-table-effectiveness"
-                              title={ev.tooltip}
-                            >
+                            <td className="compare-table-effectiveness" title={ev.tooltip}>
                               {ev.score}
                             </td>
-                              </>
-                            ) : null}
                           </tr>
                           )
                         })}
@@ -1669,7 +1535,7 @@ export default function App() {
 
               {userBundles?.length === 1 && flatPeriodResults.length === 1 ? (
                 <>
-                  {SHOW_CREATION_METRICS_AND_EFFECTIVENESS && singlePeriodEffectiveness ? (
+                  {singlePeriodEffectiveness ? (
                     <section
                       className="effectiveness-banner card"
                       aria-labelledby="effectiveness-title"
@@ -1688,10 +1554,10 @@ export default function App() {
                             Индекс активности за период
                           </h3>
                           <p className="effectiveness-banner-lead">
-                            Ориентир по <strong>комментариям</strong> в чужих MR и по <strong>своему коду</strong> в{' '}
-                            <strong>develop</strong>/<strong>dev</strong>. Число одобрений и размер чужих MR в
-                            индекс не входят — на них мало влияния. Наведите на блок — детали расчёта. Не KPI и не
-                            сравнение людей без контекста задач.
+                            Ориентир по <strong>комментариям</strong> в чужих MR (в т.ч. медиана «стр./комм.» по MR) и
+                            по <strong>push-коммитам</strong>, с бонусом за баланс между ними. Метрики созданных MR в
+                            расчёт не входят. Наведите на блок — детали расчёта. Не KPI и не сравнение людей без
+                            контекста задач.
                           </p>
                         </div>
                         <div className="effectiveness-bar-wrap" aria-hidden>
@@ -1791,51 +1657,6 @@ export default function App() {
                     </div>
                   </section>
 
-                  {SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? (
-                  <section
-                    className="stat-group stat-group--own"
-                    aria-labelledby="stat-group-own"
-                    title="Созданные вами MR с merge в develop или dev (target_branch) и размер диффа. Наведите на карточку — пояснение."
-                  >
-                    <h3 className="stat-group-title" id="stat-group-own">
-                      Собственный код
-                    </h3>
-                    <div className="stat-grid stat-grid--in-group stat-grid--compact">
-                      <article
-                        className="stat-card stat-created"
-                        title="Число MR с вами автором и целевой веткой develop или dev (GitLab target_branch), созданных за период."
-                      >
-                        <div className="stat-label">Созданных MR</div>
-                        <div className="stat-value">{flatPeriodResults[0].stats.mrsCreated}</div>
-                      </article>
-                      <article
-                        className="stat-card stat-created-diff"
-                        title="Сумма диффа по уникальным MR автора с target_branch develop или dev за период; те же величины, что в детализации по дню."
-                      >
-                        <div className="stat-label">Строк диффа в созданных MR</div>
-                        <div className="stat-value">{flatPeriodResults[0].stats.createdMrsDiffLines}</div>
-                      </article>
-                      <article
-                        className="stat-card stat-created-per-day"
-                        title="Сумма строк диффа по MR в develop/dev, делённая на число календарных дней периода."
-                      >
-                        <div className="stat-label">Средняя сумма строк диффа в день</div>
-                        <div className="stat-value stat-value--ratio">
-                          {flatPeriodResults[0].stats.avgCreatedMrsDiffLinesPerDay}
-                        </div>
-                      </article>
-                      <article
-                        className="stat-card stat-created-per-mr"
-                        title="Сумма диффа по таким MR, делённая на их число (карточка «Созданных MR» — только develop и dev)."
-                      >
-                        <div className="stat-label">Средняя сумма строк диффа на 1 MR</div>
-                        <div className="stat-value stat-value--ratio">
-                          {flatPeriodResults[0].stats.avgCreatedMrsDiffLinesPerMr}
-                        </div>
-                      </article>
-                    </div>
-                  </section>
-                  ) : null}
                 </div>
                 </>
               ) : null}
@@ -1860,21 +1681,10 @@ export default function App() {
               Активность по дням
             </h2>
             <p className="chart-lead">
-              {SHOW_CREATION_METRICS_AND_EFFECTIVENESS ? (
-                <>
-                  По дням (часовой пояс браузера): одобрения и комментарии в MR — левая шкала (количество событий);
-                  созданные вами MR <strong>в develop или dev</strong> — <strong>правая шкала</strong> (сумма строк диффа
-                  в MR за день; число MR — во всплывающей подсказке). Серии включаются и выключаются{' '}
-                  <strong>одной легендой над графиками</strong> для всех рядов сразу.
-                </>
-              ) : (
-                <>
-                  По дням (часовой пояс браузера): столбцы — число <strong>одобрений</strong>, число{' '}
-                  <strong>комментариев</strong> в чужих MR и <strong>коммитов (push)</strong> (одна шкала Y, события за
-                  день). Серии — <strong>общая легенда над графиками</strong> (действует на все графики и детализацию
-                  по дню).
-                </>
-              )}
+              По дням (часовой пояс браузера): столбцы — число <strong>одобрений</strong>, число{' '}
+              <strong>комментариев</strong> в чужих MR и <strong>коммитов (push)</strong> (одна шкала Y, события за
+              день). Серии — <strong>общая легенда над графиками</strong> (действует на все графики и детализацию по
+              дню).
               {flatPeriodResults.length > 1
                 ? compareUserCount > 1
                   ? ' Ниже — график для каждого сотрудника за один и тот же период; клик по дню открывает детали под этим графиком (список свой у каждого графика).'
@@ -1884,7 +1694,6 @@ export default function App() {
             <ActivitySeriesLegend
               visibility={sharedChartVisibility}
               onVisibilityChange={setChartVisibilityOverride}
-              showMrsCreatedSeries={SHOW_CREATION_METRICS_AND_EFFECTIVENESS}
               sticky
             />
             {flatPeriodResults.map((pr) => {
@@ -1906,7 +1715,6 @@ export default function App() {
                   }
                   visibility={sharedChartVisibility}
                   showLegend={false}
-                  showMrsCreatedSeries={SHOW_CREATION_METRICS_AND_EFFECTIVENESS}
                 />
 
                 {daySel ? (
@@ -2487,7 +2295,7 @@ export default function App() {
       </main>
 
       <footer className="footer">
-        <span>Локальный инструмент · API v4 · events, merge_requests</span>
+        <span>Локальный инструмент · API v4 · events</span>
       </footer>
 
       {loading ? (

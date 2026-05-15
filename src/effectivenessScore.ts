@@ -1,22 +1,18 @@
 /**
  * Эвристический «индекс активности» по метрикам GitLab за период.
- * Не оценка качества работы человека — только агрегат видимой активности в MR.
- * Ревью: только ваши комментарии в чужих MR (число и «вес» комментариев), без числа одобрений и без
- * размера чужих MR — на поток и дифф вы не влияете. Свой код: MR в develop/dev и дифф по ним.
+ * Не оценка качества работы человека — только агрегат видимой активности в ревью и коммитах.
+ * Учитываются: комментарии в чужих MR (интенсивность и глубина), push-события; без созданных MR и без одобрений как отдельного сигнала.
  */
 
 export type EffectivenessInput = {
   activityByDayLength: number
-  /** Из ответа периода; в индекс не входят approved и approvedMrsDiffLines — намеренно не учитываем. */
   stats: {
-    approved: string
     commented: string
-    mrsCreated: string
-    approvedMrsDiffLines: string
-    createdMrsDiffLines: string
-    avgCreatedMrsDiffLinesPerDay: string
-    avgCreatedMrsDiffLinesPerMr: string
+    pushCommits: string
+    /** Среднее «стр./комм.» по одобрённым MR — запасной сигнал глубины, если медиана недоступна. */
     avgLinesPerComment: string
+    /** Медиана (стр. диффа MR)/(число ваших комментариев в MR) по чужим MR. */
+    medianLinesPerCommentByMr: string
   }
 }
 
@@ -54,54 +50,43 @@ export type EffectivenessScoreResult = {
 
 /**
  * Веса подобраны так, чтобы «типичная» загрузка давала ~45–70, сильная активность — 80+.
- * Суточные нормы: комментарии и свой код делятся на число дней в ряду графика.
+ * Суточные нормы: комментарии и push делятся на число дней в ряду графика.
  */
 export function computeEffectivenessScore(input: EffectivenessInput): EffectivenessScoreResult {
   const days = Math.max(1, input.activityByDayLength)
   const commented = Number.parseInt(input.stats.commented, 10)
-  const mrsCreated = Number.parseInt(input.stats.mrsCreated, 10)
-  const creatDiff = parseRuNumericStat(input.stats.createdMrsDiffLines) ?? 0
-  const avgMr = parseRuNumericStat(input.stats.avgCreatedMrsDiffLinesPerMr)
+  const pushCommits = Number.parseInt(input.stats.pushCommits, 10)
   const avgLinesPerComm = parseRuNumericStat(input.stats.avgLinesPerComment)
+  const medianLinesPerMr = parseRuNumericStat(input.stats.medianLinesPerCommentByMr)
 
   const commPerDay = Number.isFinite(commented) && commented > 0 ? commented / days : 0
-  const mrPerDay = Number.isFinite(mrsCreated) && mrsCreated > 0 ? mrsCreated / days : 0
-  const creatDiffPerDay = creatDiff > 0 ? creatDiff / days : 0
+  const pushPerDay = Number.isFinite(pushCommits) && pushCommits > 0 ? pushCommits / days : 0
 
-  /** Объём ревью: только комментарии в чужих MR (на день). Одобрения и размер чужих MR не входят. */
   const reviewVolume = saturating100(commPerDay, 0.9)
-
-  const authorVolume =
-    0.42 * saturating100(mrPerDay, 0.35) + 0.58 * saturating100(creatDiffPerDay, 2200)
+  const pushVolume = saturating100(pushPerDay, 2.2)
 
   let reviewDepth = 0
-  if (Number.isFinite(commented) && commented > 0 && avgLinesPerComm != null && avgLinesPerComm > 0) {
-    reviewDepth = saturating100(avgLinesPerComm, 420)
+  if (Number.isFinite(commented) && commented > 0) {
+    const depthLines =
+      medianLinesPerMr != null && medianLinesPerMr > 0 ? medianLinesPerMr : avgLinesPerComm
+    if (depthLines != null && depthLines > 0) {
+      reviewDepth = saturating100(depthLines, 420)
+    }
   }
 
-  let mrHeft = 0
-  if (Number.isFinite(mrsCreated) && mrsCreated > 0 && avgMr != null && avgMr > 0) {
-    mrHeft = saturating100(avgMr, 320)
-  }
+  const minPillar = Math.min(reviewVolume, pushVolume)
+  const balanceBonus = minPillar >= 14 ? Math.min(10, 6.5 * (minPillar / 52)) : 0
 
-  const minPillar = Math.min(reviewVolume, authorVolume)
-  const balanceBonus = minPillar >= 18 ? Math.min(8, 6 * (minPillar / 55)) : 0
-
-  const raw =
-    0.36 * reviewVolume +
-    0.34 * authorVolume +
-    0.16 * reviewDepth +
-    0.14 * mrHeft +
-    balanceBonus
+  const raw = 0.42 * reviewVolume + 0.3 * reviewDepth + 0.2 * pushVolume + balanceBonus
 
   const score = Math.max(0, Math.min(100, Math.round(raw)))
   const band = bandForScore(score)
 
   const tooltip = [
     'Индекс активности (эвристика): не KPI и не рейтинг сотрудника.',
-    'Ревью: только комментарии в чужих MR (интенсивность и «стр./комм.»); число одобрений и размер чужих MR не учитываются.',
-    'Свой код: MR в develop/dev, строки диффа, средний размер MR; плюс бонус за баланс ревью и разработки.',
-    `Вклад частей (0–100, до бонуса): ревью ${reviewVolume.toFixed(0)}, код ${authorVolume.toFixed(0)}, глубина ${reviewDepth.toFixed(0)}, размер MR ${mrHeft.toFixed(0)}, баланс +${balanceBonus.toFixed(1)}.`,
+    'Ревью: комментарии в чужих MR (интенсивность и глубина — в основном медиана «стр./комм.» по MR).',
+    'Push-коммиты и бонус за баланс «ревью ↔ коммиты»; число одобрений и метрики созданных MR не входят.',
+    `Вклад частей (0–100, до бонуса): ревью ${reviewVolume.toFixed(0)}, глубина ${reviewDepth.toFixed(0)}, push ${pushVolume.toFixed(0)}, баланс +${balanceBonus.toFixed(1)}.`,
   ].join(' ')
 
   return { score, band, tooltip }
